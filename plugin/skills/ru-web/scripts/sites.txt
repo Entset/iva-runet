@@ -1,16 +1,16 @@
 # Сайты, которые открываются только через ruweb (web_fetch к ним не ходит).
-# Формат: домен [warm|strict|home] [expect=<css>]  # заметка
+# Формат: домен [warm|strict|fox] [expect=<css>]  # заметка
 #   без флага — постоянный профиль на сервере, обычный темп;
 #   warm      — перед первым заходом прогрев профиля (~1 мин раз в 3 дня) и вход с главной;
 #   strict    — как warm + сессии с перерывами, 09–22 МСК, ≤40 переходов в час;
-#   home      — только в настоящем Chrome дома/в офисе (tunnel/home/browser.md); без него — HOME_DOWN.
+#   fox       — Camoufox вместо Chrome (сайт распознаёт серверный Chrome), обычный темп.
 # Ива дописывает сюда сама, если обычный запрос получил блок (`ruweb mark <домен>`).
 avito.ru strict expect=[data-marker=item]
 wildberries.ru warm
 market.yandex.ru
 rts-tender.ru
-samokat.ru home
-perekrestok.ru home
-kuper.ru home
-megamarket.ru home  # ServicePipe, как у Самоката; не проверено
-ozon.ru home  # блок серверного Chrome; не проверено
+samokat.ru fox  # ServicePipe; Chrome — блок всегда, Camoufox — открывался (2026-10-26), после частых заходов проверка на IP
+perekrestok.ru fox  # то же
+ozon.ru fox  # Chrome — «нет соединения»; Camoufox — открывается, поиск работает
+kuper.ru fox  # ServicePipe с капчей «я не робот» даже в Camoufox
+megamarket.ru fox  # капча-слайдер даже в Camoufox

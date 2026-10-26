@@ -27,23 +27,23 @@ log() { echo "$(date '+%F %T') $*" >> "$ST/logs/ruweb.log"; }
 # Headed (agent-browser starts Xvfb itself) when Xvfb is installed: fewer headless tells than headless=new.
 # 9>&- : the agent-browser daemon and Chrome must not inherit the lock fd, or the lock never frees.
 HEADED=; command -v Xvfb >/dev/null && HEADED=--headed
-# home: sites behind fingerprinting anti-bots (ServicePipe: Samokat, Perekrestok, Kuper) block any server Chrome, warm or not.
-# They open in a real Chrome on a home/office computer, reachable on the VPS at 127.0.0.1:$HOME_CDP via `ssh -R`.
-# ruweb only attaches to it and detaches: no profile prep, no UA/stealth overrides, never kills it.
-HOME_CDP=${RUWEB_HOME_CDP:-9222}
+# fox: sites behind fingerprinting anti-bots (ServicePipe: Samokat, Perekrestok; Ozon) block any server Chrome, warm or not.
+# They go to Camoufox (fox.py: Firefox with a C++-level fingerprint, same commands). One engine runs at a time.
 MODE=$(cat "$ST/mode" 2>/dev/null || echo local)
+[ "$MODE" = fox ] && PROFILE=$ST/fox-profile
 ab() {
-  if [ "$MODE" = home ]; then agent-browser --session ruweb-home --cdp "$HOME_CDP" "$@" 9>&-; return; fi
+  if [ "$MODE" = fox ]; then python3 "$HERE/fox.py" "$@" 9>&-; return; fi
   agent-browser --session ruweb --profile "$PROFILE" --executable-path "$HERE/chrome" $HEADED \
     --init-script "$HERE/stealth.js" --user-agent "$UA" --args "--no-sandbox" "$@" 9>&-
 }
 host() { local h=${1#*://}; h=${h%%/*}; h=${h%%:*}; echo "${h#www.}"; }
 rnd() { echo $(( $1 + RANDOM % ($2 - $1 + 1) )); }
 pause() { sleep "$(( $1 + RANDOM % ($2 - $1 + 1) )).$(( RANDOM % 10 ))"; }  # random $1..$2+0.9 s
-home_up() { curl -s -m 5 -o /dev/null "http://127.0.0.1:$HOME_CDP/json/version"; }
-running() { if [ "$MODE" = home ]; then home_up; else pgrep -f -- "--user-data-dir=$PROFILE( |$)" >/dev/null; fi; }
+# Chrome: --user-data-dir=<profile>; Camoufox: -profile <profile> (and the fox.py daemon with the same path).
+PAT() { [ "$MODE" = fox ] && echo "$PROFILE( |$)" || echo "--user-data-dir=$PROFILE( |$)"; }
+running() { pgrep -f -- "$(PAT)" >/dev/null; }
 # PSS (shared pages split between processes), so the sum is real memory use.
-rss_mb() { pgrep -f -- "--user-data-dir=$PROFILE( |$)" | sed 's|.*|/proc/&/smaps_rollup|' | xargs -r awk '/^Pss:/ {s+=$2} END{print int(s/1024)}' 2>/dev/null || echo 0; }
+rss_mb() { pgrep -f -- "$(PAT)" | sed 's|.*|/proc/&/smaps_rollup|' | xargs -r awk '/^Pss:/ {s+=$2} END{print int(s/1024)}' 2>/dev/null || echo 0; }
 
 # One browser, one owner. The kernel drops the lock when the holder dies, so it can't go stale.
 lock() {
@@ -54,7 +54,7 @@ lock() {
 # sites.txt line: `domain [strict] [expect=<css>]  # comment`. Prints the matching domain and its level; fails if not listed.
 site() {
   awk -v h="$(host "$1")" '!/^[[:space:]]*#/ && NF { sub(/#.*/, ""); d = $1
-    if (h == d || substr(h, length(h) - length(d)) == "." d) { print d, ($2 ~ /^(strict|warm|home)$/ ? $2 : "normal"); f = 1; exit } }
+    if (h == d || substr(h, length(h) - length(d)) == "." d) { print d, ($2 ~ /^(strict|warm|fox)$/ ? $2 : "normal"); f = 1; exit } }
     END { exit !f }' "$ST/sites.txt"
 }
 level() { site "$1" | awk '{print $2}'; }
@@ -81,25 +81,66 @@ PY
 }
 
 start() {
-  if [ "$MODE" = home ]; then
-    home_up || { echo "HOME_DOWN: домашний браузер не на связи (Chrome с --remote-debugging-port=$HOME_CDP и ssh -R на домашнем компьютере). С сервера этот сайт не открыть — сообщи владельцу."; exit 8; }
-    touch "$ST/last"; return 0
-  fi
   running && return 0
-  prep_profile
+  [ "$MODE" = fox ] || prep_profile   # Camoufox: locale, DoH, WebRTC set in fox.py
   ab open about:blank >/dev/null || { ab close >/dev/null 2>&1; ab open about:blank >/dev/null; } || return 1
   ab set viewport $VW $VH >/dev/null   # outer window ≈ 1440x900 = screen
-  touch "$ST/last"; log "start (Chrome $VER)"
+  touch "$ST/last"; log "start $([ "$MODE" = fox ] && echo Camoufox || echo "Chrome $VER")"
   # the background subshell must drop the lock fd itself and become the watcher, or it holds the lock forever
   { [ -n "${RUWEB_NOWATCH:-}" ] || pgrep -f "/ruweb _watch$" >/dev/null || exec nohup setsid "$0" _watch >/dev/null 2>&1; } 9>&- &
 }
 
-stop() { if [ "$MODE" = home ]; then ab close >/dev/null 2>&1; log "detach home $*"; return; fi   # never kill the home browser
-  ab close >/dev/null 2>&1; pkill -f -- "--user-data-dir=$PROFILE( |$)" 2>/dev/null; sleep 1; log "stop $*"; }
+stop() { vnc_off; ab close >/dev/null 2>&1; pkill -f -- "$(PAT)" 2>/dev/null; sleep 1; rm -f "$ST/fox.sock"; log "stop $MODE $*"; }
+
+# --- Owner passes a check (captcha, login) by hand: the browser's own screen over VNC, localhost only (owner: ssh -L).
+# The site's clearance cookie then stays in the persistent profile. Iva never solves captchas itself.
+VNC_PORT=${RUWEB_VNC_PORT:-5900} CAPTCHA_MAX=7200
+vnc_off() { [ -f "$ST/vnc.pid" ] && kill "$(cat "$ST/vnc.pid")" 2>/dev/null; rm -f "$ST/vnc.pid" "$ST/captcha"; }
+# "<display> [xauth file]" of the browser's screen: fox.py's own Xvfb, or the Xvfb agent-browser starts for headed Chrome
+# (display chosen via -displayfd, so read from its socket). ponytail: newest agent-browser Xvfb — wrong if another headed session started later.
+browser_display() {
+  if [ "$MODE" = fox ]; then pgrep -f "^Xvfb :${RUWEB_FOX_DISPLAY:-88} " >/dev/null && echo ":${RUWEB_FOX_DISPLAY:-88}"; return; fi
+  local x; x=$(pgrep -n -f "^Xvfb .*agent-browser-xauth") || return 0
+  echo "$(ss -xlpn 2>/dev/null | grep "pid=$x," | grep -o 'X11-unix/X[0-9]*' | head -1 | sed 's|.*X|:|') $(tr '\0' '\n' < /proc/$x/cmdline | grep -A1 '^-auth$' | tail -1)"
+}
+captcha_wait() {   # navigation is paused while the owner is in the window
+  [ -f "$ST/captcha" ] || return 0
+  if [ $(( $(date +%s) - $(stat -c %Y "$ST/captcha") )) -gt $CAPTCHA_MAX ]; then vnc_off; log "captcha expired"; return 0; fi
+  echo "CAPTCHA_WAIT: владелец проходит проверку в окне браузера ($(cat "$ST/captcha")). Браузер не трогать; после «готово» от владельца — \`ruweb captcha done\`."; exit 9
+}
+captcha() {
+  [ -f "$ST/vnc.pass" ] || { echo "NO_VNC_PASS: владелец один раз задаёт пароль в своём терминале: x11vnc -storepasswd $ST/vnc.pass"; exit 9; }
+  local u=${1:-} d disp auth
+  if [ -n "$u" ]; then   # owner-driven: no cooldown, no pace, no detector — a person is about to look at it
+    d=$(host "$u"); M=local; [ "$(level "$u")" = fox ] && M=fox
+    if [ "$M" != "$MODE" ]; then stop "switch to $M"; echo "$M" > "$ST/mode"; MODE=$M
+      PROFILE=$ST/profile; [ "$M" = fox ] && PROFILE=$ST/fox-profile; fi
+    start || exit 1; nav "$u" || exit 1
+  else running || { echo "браузер не запущен: ruweb captcha <url>"; exit 1; }; d=$(host "$(ab get url)"); fi
+  read -r disp auth <<<"$(browser_display)"
+  [ -n "$disp" ] || { echo "у браузера нет экрана (headless): нужен Xvfb (sudo apt install -y xvfb), затем ruweb restart"; exit 1; }
+  vnc_off
+  x11vnc -display "$disp" ${auth:+-auth "$auth"} -localhost -rfbport "$VNC_PORT" -rfbauth "$ST/vnc.pass" -forever -shared -noxdamage \
+    -bg -o "$ST/logs/vnc.log" >/dev/null 2>&1 9>&- || { echo "x11vnc не запустился, см. $ST/logs/vnc.log"; exit 1; }
+  pgrep -n -f "x11vnc -display $disp " > "$ST/vnc.pid"; echo "$d" > "$ST/captcha"; touch "$ST/last"; log "captcha $d (vnc $disp)"
+  echo "CAPTCHA_OWNER $d: окно браузера открыто для владельца на 2 ч. Передай владельцу:
+  1) на своём компьютере/телефоне: ssh -N -L $VNC_PORT:localhost:$VNC_PORT $(whoami)@$(curl -4 -s -m 5 https://ifconfig.me/ip || echo '<IP сервера>')
+  2) VNC-клиент → localhost:$VNC_PORT, пароль VNC — его собственный;
+  3) пройти проверку (можно войти в аккаунт), написать «готово».
+Потом: ruweb captcha done. До этого браузер не трогать."
+}
+captcha_done() {
+  local d; d=$(cat "$ST/captcha" 2>/dev/null); vnc_off
+  [ -n "$d" ] || { echo "проверка не была открыта"; exit 1; }
+  # the owner passed it by hand: earlier blocks of this site no longer count
+  awk -v d="$d" '$1!=d' "$ST/blocks" > "$ST/blocks.t" && mv "$ST/blocks.t" "$ST/blocks"
+  log "captcha done $d"; jlog_begin captcha "$d" owner; check_block "$d"; jlog_end
+}
 
 watch() {
   while sleep 60; do
     running || exit 0
+    [ -f "$ST/captcha" ] && touch "$ST/last"   # the owner is in the window: not idle
     [ $(( $(date +%s) - $(stat -c %Y "$ST/last") )) -gt $IDLE_MAX ] && { stop idle; exit 0; }
     [ "$(rss_mb)" -gt $RSS_MAX_MB ] && { stop "rss $(rss_mb)MB"; exit 0; }
   done
@@ -234,6 +275,7 @@ TITLE_RE='Доступ ограничен|Похоже, нет соединен�
 
 looks_blocked() {
   url=$(ab get url 2>/dev/null); title=$(ab get title 2>/dev/null)
+  [[ $url == */xpvnsulc/* ]] && return 0   # ServicePipe check page (Samokat, Perekrestok, Kuper, Megamarket); can be empty
   local text; text=$(ab get text body 2>/dev/null | head -c 20000)
   # Error codes count only on near-empty pages; phrases count anywhere in the title or on short pages.
   grep -qiE "$TITLE_RE" <<<"$title" || { [ ${#text} -lt 1500 ] && grep -qiE "$BLOCK_RE" <<<"$title $text"; }
@@ -283,6 +325,15 @@ check_block() {
 
 # Forget one site (the block sticks to its cookies/storage) but keep the rest of the warm profile.
 purge_site() {
+  if [ "$MODE" = fox ]; then   # Firefox: cookies + per-origin storage dirs
+    python3 - "$PROFILE/cookies.sqlite" "$1" <<'PY'
+import sqlite3, sys
+db, d = sys.argv[1:]
+c = sqlite3.connect(db)
+c.execute("delete from moz_cookies where host in (?, ?) or host like ?", (d, '.' + d, '%.' + d)); c.commit()
+PY
+    rm -rf "$PROFILE"/storage/default/*"$1"* "$PROFILE"/cache2 "$ST/warm.$1"; return
+  fi
   python3 - "$PROFILE/Default/Cookies" "$1" <<'PY'
 import sqlite3, sys
 db, d = sys.argv[1:]
@@ -303,11 +354,11 @@ blocked() {
   echo "$d $until $now" >> "$ST/blocks"; log "BLOCK $d ($why) #$((n + 1))"
   [ "$lvl" = strict ] && session_close
   stop "block $d"
-  [ "$MODE" = home ] || purge_site "$d"   # the home profile is the owner's: never wiped from here
+  purge_site "$d"
   if [ "$n" -ge 1 ]; then
-    echo "STOP $d: повторная блокировка за сутки ($why). Прекрати работу с сайтом и сообщи владельцу. Капчу не решать."; exit 4
+    echo "STOP $d: повторная блокировка за сутки ($why). Прекрати работу с сайтом и сообщи владельцу. Капчу не решать; если владелец готов пройти проверку сам — ruweb captcha <url>."; exit 4
   fi
-  echo "BLOCKED $d: $why. Остановлено, данные сайта стёрты (остальной профиль цел), пауза до $(date -d @"$until" +%H:%M), затем один повтор с прогревом. Капчу не решать — сообщи владельцу."; exit 3
+  echo "BLOCKED $d: $why. Остановлено, данные сайта стёрты (остальной профиль цел), пауза до $(date -d @"$until" +%H:%M), затем один повтор с прогревом. Капчу не решать — сообщи владельцу; если он готов пройти проверку сам — ruweb captcha <url>."; exit 3
 }
 
 # --- Action log: one JSON line per action for report.sh. pause = idle time before the action, dur = its length.
@@ -390,6 +441,8 @@ dailywarm() {
   [ "${day:-}" = "$today" ] || { day=$today target=$(rnd 2 4) done=0 last=0; }
   [ "$done" -lt "$target" ] && [ $(( $(date +%s) - last )) -ge 600 ] || exit 0
   set -- $NEUTRAL; shift $(( RANDOM % $# )); local u=$1
+  if [ "$MODE" = fox ]; then running && exit 0   # warms the Chrome profile: Camoufox in use → next round
+    echo local > "$ST/mode"; MODE=local PROFILE=$ST/profile; fi
   start || exit 1
   pace "$(host "$u")" normal; ab open "$u" >/dev/null 2>&1 && read_page normal
   echo "$day $target $(( done + 1 )) $(date +%s)" > "$f"; log "dailywarm $u ($(( done + 1 ))/$target)"
@@ -406,8 +459,8 @@ case $cmd in
   stop) stop manual; echo "OK stopped" ;;
   restart) stop restart; start && echo "OK restarted" ;;
   status)
-    echo "mode $MODE; home browser: $(home_up && echo up || echo down) (127.0.0.1:$HOME_CDP)"
-    if [ "$MODE" = home ]; then :; elif running; then echo "running, rss $(rss_mb)MB, idle $(( $(date +%s) - $(stat -c %Y "$ST/last") ))s"; else echo "stopped"; fi
+    echo "engine $MODE"
+    if running; then echo "running, rss $(rss_mb)MB, idle $(( $(date +%s) - $(stat -c %Y "$ST/last") ))s"; else echo "stopped"; fi
     echo "profile $(du -sm "$PROFILE" 2>/dev/null | cut -f1)MB; blocks today: $(awk -v t=$(( $(date +%s) - 86400 )) '$3>t {print $1}' "$ST/blocks" | sort | uniq -c | tr '\n' ' ')"
     [ -f "$ST/session" ] && echo "session: $(awk '{printf "%s %d/%d actions, %d min left", $1, $5, $4, ($3-systime())/60}' "$ST/session")"
     for f in "$ST"/break.*; do [ -f "$f" ] && [ "$(cat "$f")" -gt "$(date +%s)" ] && echo "break ${f##*/break.} until $(date -d @"$(cat "$f")" +%H:%M)"; done ;;
@@ -422,10 +475,12 @@ case $cmd in
     log "mark $d"; echo "OK $d в списке чувствительных" ;;
   warm) start || exit 1; d=$(host "$1"); cooldown "$d"; rm -f "$ST/warm.$d"; warm "$d" && echo "OK warmed $d" ;;
   endsession) session_close; echo "OK session closed" ;;
+  captcha) if [ "${1:-}" = done ]; then captcha_done; else captcha "${1:-}"; fi ;;
   open)
-    d=$(host "$1"); lvl=$(level "$1"); cooldown "$d"
-    M=local; [ "$lvl" = home ] && M=home
-    [ "$M" = "$MODE" ] || { echo "$M" > "$ST/mode"; MODE=$M; }
+    captcha_wait; d=$(host "$1"); lvl=$(level "$1"); cooldown "$d"
+    M=local; [ "$lvl" = fox ] && M=fox
+    if [ "$M" != "$MODE" ]; then stop "switch to $M"; echo "$M" > "$ST/mode"; MODE=$M   # RAM: one engine at a time
+      PROFILE=$ST/profile; [ "$M" = fox ] && PROFILE=$ST/fox-profile; fi
     if [ "$lvl" = strict ]; then sd=$(site "$1" | cut -d' ' -f1); session_gate "$sd"; start || exit 1
       jlog_begin open "$sd" url; enter "$1" "$sd"; jlog_end; exit; fi
     if [ "$lvl" = warm ]; then sd=$(site "$1" | cut -d' ' -f1); start || exit 1
@@ -434,7 +489,7 @@ case $cmd in
     nav "$1" || { running && exit 1; start && nav "$1"; } || exit 1
     close_extra_tabs; read_page normal; check_block "$d"; jlog_end ;;
   click|back|forward|reload|scroll|type)
-    start || exit 1; cur=$(ab get url); d=$(host "$cur"); lvl=$(level "$cur"); lvl=${lvl:-normal}; cooldown "$d"
+    captcha_wait; start || exit 1; cur=$(ab get url); d=$(host "$cur"); lvl=$(level "$cur"); lvl=${lvl:-normal}; cooldown "$d"
     sd=$(site "$cur" | cut -d' ' -f1); sd=${sd:-$d}
     [ "$lvl" = strict ] && session_gate "$sd"
     case $cmd in click) how=click ;; type|scroll) how=- ;; *) how=$cmd ;; esac
@@ -453,5 +508,5 @@ case $cmd in
         else ab "$cmd" "$@" >/dev/null || exit 1; fi
         ab wait --load domcontentloaded >/dev/null 2>&1; close_extra_tabs; read_page "$lvl"; check_block "$sd"; jlog_end ;;
     esac ;;
-  *) start || exit 1; touch "$ST/last"; ab "$cmd" "$@" ;;
+  *) captcha_wait; start || exit 1; touch "$ST/last"; ab "$cmd" "$@" ;;
 esac

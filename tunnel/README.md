@@ -13,8 +13,6 @@
 | Windows / macOS, включённый всегда | SSH | [home/ssh-any-device.md](home/ssh-any-device.md) |
 | Android-телефон | SSH | [home/android.md](home/android.md) |
 
-Дополнительно, для Самоката, Перекрёстка, Купера: [home/browser.md](home/browser.md) — настоящий Chrome дома, при любом транспорте.
-
 Обычный роутер (провайдерский, TP-Link, ASUS) не настраиваем — выходом служит устройство за ним.
 WireGuard быстрее и надёжнее; SSH проще (одна команда, без прав администратора), только TCP.
 
@@ -25,7 +23,7 @@ WireGuard быстрее и надёжнее; SSH проще (одна кома�
 | `server/install-wireguard.sh` | WireGuard; печатает ключ и адрес для дома |
 | `server/add-peer.sh <ключ>` | подключить дом (WireGuard) |
 | `server/install-ssh-socks.sh` | SSH-вариант |
-| `server/add-device.sh "<ssh-ключ>"` | подключить устройство (SSH-транспорт и домашний браузер) |
+| `server/add-device.sh "<ssh-ключ>"` | подключить устройство (SSH-транспорт) |
 | `server/enable-routes.sh` | включить маршруты и проверить |
 | `server/check.sh` | диагностика |
 | `server/rollback.sh` | откат |

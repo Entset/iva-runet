@@ -30,7 +30,7 @@
    - ничего / туннель не нужен (VPS уже в России) → пропустить шаги 2–4.
    Если вариантов несколько: роутер (OpenWrt/Keenetic/MikroTik) > Linux 24/7 > телефон > ПК.
 2. Нужно ли открывать **zakupki.gov.ru и госсайты** (потребуется доверие к сертификату Минцифры — решение владельца).
-3. Нужны ли **Самокат, Перекрёсток, Купер** (нужен домашний компьютер с Chrome, включённый во время работы).
+3. Нужны ли **Самокат, Перекрёсток, Ozon** (ставится Camoufox, ~700 МБ на диске, ~550 МБ RAM во время работы).
 
 ## 1. Проверка сервера
 
@@ -111,9 +111,17 @@ $R status; $R stop
 
 ## 6. Дополнительно
 
-- **Домашний браузер** (вопрос 3): `tunnel/home/browser.md`. Сначала владелец проверяет эти сайты в своём браузере дома.
-  Готово, если: `$R status` → `home browser: up`, `$R open https://samokat.ru/` → `OK`.
+- **Camoufox** (вопрос 3) — без sudo:
+  ```bash
+  command -v uv || curl -LsSf https://astral.sh/uv/install.sh | sh
+  uv venv ~/.iva-browser/camoufox/venv && uv pip install -p ~/.iva-browser/camoufox/venv/bin/python "camoufox[geoip]"
+  ~/.iva-browser/camoufox/venv/bin/python -m camoufox fetch
+  ```
+  Нужен Xvfb (`sudo apt install -y xvfb`, см. ниже). Готово, если: `$R open https://www.ozon.ru/` → `OK Ozon …`, `$R status` → `engine fox`.
 
+- **Окно для владельца** (капча, вход в аккаунт) — `x11vnc` (`sudo apt install -y x11vnc`), пароль владелец задаёт сам
+  в своём терминале: `x11vnc -storepasswd ~/.iva-browser/vnc.pass` (не печатать и не просить в чат).
+  Готово, если: `$R captcha https://ya.ru/` → `CAPTCHA_OWNER`, владелец видит окно, `$R captcha done` → `OK`.
 - **Госсайты** (вопрос 2): `data/custom/plugins/runet/skills/ru-web/scripts/trust-ru-ca.sh` — доверие к сертификату
   Минцифры для браузера; скрипт печатает, что ещё сделать для Node (web_fetch) и системы. Это корневой сертификат для всех сайтов —
   только с явного «да» владельца.
