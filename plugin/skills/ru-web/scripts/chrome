@@ -1,0 +1,7 @@
+#!/bin/sh
+# Chrome launcher for ruweb: RU locale, Moscow TZ, consistent screen; newest Chrome agent-browser installed.
+export TZ=Europe/Moscow LANG=ru_RU.UTF-8 LANGUAGE=ru_RU:ru
+BIN=$(ls -d "$HOME"/.agent-browser/browsers/chrome-*/chrome 2>/dev/null | sort -V | tail -1)
+exec "$BIN" --lang=ru-RU --accept-lang=ru-RU,ru --window-size=1440,900 --screen-info={1440x900} \
+  --disable-blink-features=AutomationControlled --force-webrtc-ip-handling-policy=disable_non_proxied_udp --disable-dev-shm-usage --renderer-process-limit=2 \
+  --disable-features=site-per-process,IsolateOrigins,BackForwardCache --js-flags=--max-old-space-size=384 "$@"

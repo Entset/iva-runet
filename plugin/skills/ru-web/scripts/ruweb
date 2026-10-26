@@ -1,0 +1,457 @@
+#!/usr/bin/env bash
+# ruweb — agent-browser for anti-bot RU sites: persistent warm profile, human pace, block detector.
+# Sites come in two levels (sites.txt): normal sensitive, and `strict` (Avito) — sessions with breaks, warmed, enters via the home page.
+# State lives in ~/.iva-browser (outside Iva, survives `iva update`).
+# v2 (2026-10-25): flock for all; Avito-only (strict): sessions/working hours (MSK), human mouse/typing, soft blocks, entry via search;
+# all sites: pace, hard-block detector, batch reading scroll, WebRTC leak closed, action log human-v2.jsonl.
+set -u
+HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+ST=${RUWEB_HOME:-$HOME/.iva-browser}
+PROFILE=$ST/profile
+IDLE_MAX=1800      # stop the browser after 30 min without use
+RSS_MAX_MB=1000    # Chrome PSS ceiling; ponytail: checked once a minute by the watchdog, cgroup MemoryMax needs root/systemd
+STRICT_PER_HOUR=40 # navigations per hour on one strict site
+SESS_PER_HOUR=3 SESS_PER_DAY=8   # strict-site sessions
+VW=1440 VH=757                   # viewport (window 1440x900)
+mkdir -p "$ST/logs"
+[ -f "$ST/sites.txt" ] || cp "$HERE/sites.txt" "$ST/sites.txt"
+touch "$ST/blocks" "$ST/navs" "$ST/sessions"
+# cron and bare shells lack nvm's PATH
+command -v agent-browser >/dev/null || PATH=$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1):$PATH
+
+VER=$(ls -d "$HOME"/.agent-browser/browsers/chrome-* 2>/dev/null | sort -V | tail -1 | sed 's/.*chrome-\([0-9]*\).*/\1/')
+UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${VER:-152}.0.0.0 Safari/537.36"
+
+log() { echo "$(date '+%F %T') $*" >> "$ST/logs/ruweb.log"; }
+# --no-sandbox: Ubuntu 24.04 AppArmor blocks Chrome's sandbox for unprivileged users (see Iva docs/troubleshooting.md)
+# Headed (agent-browser starts Xvfb itself) when Xvfb is installed: fewer headless tells than headless=new.
+# 9>&- : the agent-browser daemon and Chrome must not inherit the lock fd, or the lock never frees.
+HEADED=; command -v Xvfb >/dev/null && HEADED=--headed
+# home: sites behind fingerprinting anti-bots (ServicePipe: Samokat, Perekrestok, Kuper) block any server Chrome, warm or not.
+# They open in a real Chrome on a home/office computer, reachable on the VPS at 127.0.0.1:$HOME_CDP via `ssh -R`.
+# ruweb only attaches to it and detaches: no profile prep, no UA/stealth overrides, never kills it.
+HOME_CDP=${RUWEB_HOME_CDP:-9222}
+MODE=$(cat "$ST/mode" 2>/dev/null || echo local)
+ab() {
+  if [ "$MODE" = home ]; then agent-browser --session ruweb-home --cdp "$HOME_CDP" "$@" 9>&-; return; fi
+  agent-browser --session ruweb --profile "$PROFILE" --executable-path "$HERE/chrome" $HEADED \
+    --init-script "$HERE/stealth.js" --user-agent "$UA" --args "--no-sandbox" "$@" 9>&-
+}
+host() { local h=${1#*://}; h=${h%%/*}; h=${h%%:*}; echo "${h#www.}"; }
+rnd() { echo $(( $1 + RANDOM % ($2 - $1 + 1) )); }
+pause() { sleep "$(( $1 + RANDOM % ($2 - $1 + 1) )).$(( RANDOM % 10 ))"; }  # random $1..$2+0.9 s
+home_up() { curl -s -m 5 -o /dev/null "http://127.0.0.1:$HOME_CDP/json/version"; }
+running() { if [ "$MODE" = home ]; then home_up; else pgrep -f -- "--user-data-dir=$PROFILE( |$)" >/dev/null; fi; }
+# PSS (shared pages split between processes), so the sum is real memory use.
+rss_mb() { pgrep -f -- "--user-data-dir=$PROFILE( |$)" | sed 's|.*|/proc/&/smaps_rollup|' | xargs -r awk '/^Pss:/ {s+=$2} END{print int(s/1024)}' 2>/dev/null || echo 0; }
+
+# One browser, one owner. The kernel drops the lock when the holder dies, so it can't go stale.
+lock() {
+  exec 9>"$ST/lock"
+  flock -w "${1:-120}" 9 || { echo "BUSY: браузер занят другим запросом дольше ${1:-120} с. Повтори позже, параллельно не запускать."; exit 6; }
+}
+
+# sites.txt line: `domain [strict] [expect=<css>]  # comment`. Prints the matching domain and its level; fails if not listed.
+site() {
+  awk -v h="$(host "$1")" '!/^[[:space:]]*#/ && NF { sub(/#.*/, ""); d = $1
+    if (h == d || substr(h, length(h) - length(d)) == "." d) { print d, ($2 ~ /^(strict|warm|home)$/ ? $2 : "normal"); f = 1; exit } }
+    END { exit !f }' "$ST/sites.txt"
+}
+level() { site "$1" | awk '{print $2}'; }
+expect_sel() { awk -v d="$1" '!/^[[:space:]]*#/ && $1==d { sub(/#.*/, ""); for (i = 2; i <= NF; i++) if ($i ~ /^expect=/) print substr($i, 8) }' "$ST/sites.txt"; }
+
+# Locale, DNS-over-HTTPS (Yandex DNS — goes through the home exit like any RU address) and WebRTC policy written into the profile before Chrome starts.
+# WebRTC: without it STUN goes straight out of the server's own interface and shows sites the datacenter IP next to the home IP.
+prep_profile() {
+  mkdir -p "$PROFILE/Default"
+  python3 - "$PROFILE" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+def merge(path, patch):
+    try: d = json.load(open(path))
+    except Exception: d = {}
+    for k, v in patch.items():
+        d[k] = {**d.get(k, {}), **v} if isinstance(v, dict) and isinstance(d.get(k), dict) else v
+    json.dump(d, open(path, 'w'))
+merge(os.path.join(p, 'Local State'), {'dns_over_https': {'mode': 'secure', 'templates': 'https://77.88.8.8/dns-query'}})
+merge(os.path.join(p, 'Default', 'Preferences'), {
+    'intl': {'selected_languages': 'ru-RU,ru', 'accept_languages': 'ru-RU,ru'},
+    'webrtc': {'ip_handling_policy': 'disable_non_proxied_udp', 'multiple_routes_enabled': False, 'nonproxied_udp_enabled': False}})
+PY
+}
+
+start() {
+  if [ "$MODE" = home ]; then
+    home_up || { echo "HOME_DOWN: домашний браузер не на связи (Chrome с --remote-debugging-port=$HOME_CDP и ssh -R на домашнем компьютере). С сервера этот сайт не открыть — сообщи владельцу."; exit 8; }
+    touch "$ST/last"; return 0
+  fi
+  running && return 0
+  prep_profile
+  ab open about:blank >/dev/null || { ab close >/dev/null 2>&1; ab open about:blank >/dev/null; } || return 1
+  ab set viewport $VW $VH >/dev/null   # outer window ≈ 1440x900 = screen
+  touch "$ST/last"; log "start (Chrome $VER)"
+  # the background subshell must drop the lock fd itself and become the watcher, or it holds the lock forever
+  { [ -n "${RUWEB_NOWATCH:-}" ] || pgrep -f "/ruweb _watch$" >/dev/null || exec nohup setsid "$0" _watch >/dev/null 2>&1; } 9>&- &
+}
+
+stop() { if [ "$MODE" = home ]; then ab close >/dev/null 2>&1; log "detach home $*"; return; fi   # never kill the home browser
+  ab close >/dev/null 2>&1; pkill -f -- "--user-data-dir=$PROFILE( |$)" 2>/dev/null; sleep 1; log "stop $*"; }
+
+watch() {
+  while sleep 60; do
+    running || exit 0
+    [ $(( $(date +%s) - $(stat -c %Y "$ST/last") )) -gt $IDLE_MAX ] && { stop idle; exit 0; }
+    [ "$(rss_mb)" -gt $RSS_MAX_MB ] && { stop "rss $(rss_mb)MB"; exit 0; }
+  done
+}
+
+# Refuse while a domain is cooling down after a block. Lines in blocks: domain until_epoch blocked_epoch
+cooldown() {
+  local d=$1 now; now=$(date +%s)
+  local until; until=$(awk -v d="$d" '$1==d {u=$2} END{print u+0}' "$ST/blocks")
+  if [ "$until" -gt "$now" ]; then
+    echo "COOLDOWN $d: пауза после блокировки до $(date -d @"$until" +%H:%M). Не открывать сайт до этого времени."; exit 3
+  fi
+}
+
+# --- Sessions (strict sites): 4–12 min, 6–15 actions, then a 10–40 min break; ≤3/hour, ≤8/day; 09–22 MSK.
+# session: site start end max_actions actions id last_action. sessions: site start end actions id. break.<site>: epoch.
+msk_hour() { echo "${RUWEB_TEST_HOUR:-$(( 10#$(TZ=Europe/Moscow date +%H) ))}"; }   # RUWEB_TEST_HOUR: acceptance only
+wait_msg() { echo "WAIT $(( ($1 + 59) / 60 )) мин $2: $3 Не ждать в этом ходе — сообщи владельцу и продолжи позже."; exit 7; }
+session_close() {
+  local s_site s_start s_end s_max s_n s_id s_last
+  read -r s_site s_start s_end s_max s_n s_id s_last 2>/dev/null < "$ST/session" || return 0
+  echo "$s_site $s_start $s_last $s_n $s_id" >> "$ST/sessions"
+  # the break counts from the last action, so idle time already spent counts towards it
+  echo $(( s_last + $(rnd 600 2400) )) > "$ST/break.$s_site"
+  rm -f "$ST/session"; log "session end $s_site ${s_n} actions $(( (s_last - s_start) / 60 )) min"
+}
+SID=- SESSION_NEW=
+session_gate() {
+  local d=$1 now; now=$(date +%s)
+  local s_site s_start s_end s_max s_n s_id s_last
+  if read -r s_site s_start s_end s_max s_n s_id s_last 2>/dev/null < "$ST/session"; then
+    if [ "$s_site" = "$d" ] && [ "$now" -lt "$s_end" ] && [ "$s_n" -lt "$s_max" ]; then
+      echo "$d $s_start $s_end $s_max $(( s_n + 1 )) $s_id $now" > "$ST/session"; SID=$s_id; return 0
+    fi
+    session_close
+  fi
+  local brk; brk=$(cat "$ST/break.$d" 2>/dev/null || echo 0)
+  [ "$now" -lt "$brk" ] && wait_msg $(( brk - now )) "$d" "перерыв между сессиями (как человек отошёл)."
+  local h; h=$(msk_hour) night=
+  if [ "$h" -lt 9 ] || [ "$h" -ge 22 ]; then
+    [ -n "${RUWEB_OWNER:-}" ] || wait_msg $(( ((9 - h + 24) % 24) * 3600 )) "$d" "ночь по МСК — только по прямой просьбе владельца (RUWEB_OWNER=1)."
+    local nl; nl=$(cat "$ST/night.last" 2>/dev/null || echo 0)
+    [ $(( now - nl )) -lt 28800 ] && wait_msg $(( nl + 28800 - now )) "$d" "ночью уже была сессия — одна за ночь."
+    night=1; echo "$now" > "$ST/night.last"
+  fi
+  local hr; hr=$(awk -v d="$d" -v t=$(( now - 3600 )) '$1==d && $2>t' "$ST/sessions" | sort -k2n)
+  if [ "$(grep -c . <<<"$hr")" -ge $SESS_PER_HOUR ]; then
+    wait_msg $(( $(head -1 <<<"$hr" | cut -d' ' -f2) + 3600 - now )) "$d" "$SESS_PER_HOUR сессии за час — лимит."
+  fi
+  local dy; dy=$(awk -v d="$d" -v t=$(( now - 86400 )) '$1==d && $2>t' "$ST/sessions" | sort -k2n)
+  if [ "$(grep -c . <<<"$dy")" -ge $SESS_PER_DAY ]; then
+    wait_msg $(( $(head -1 <<<"$dy" | cut -d' ' -f2) + 86400 - now )) "$d" "$SESS_PER_DAY сессий за сутки — лимит."
+  fi
+  local dur max
+  if [ -n "$night" ]; then dur=$(rnd 240 420) max=$(rnd 6 8); else dur=$(rnd 240 720) max=$(rnd 6 15); fi
+  SID=$now SESSION_NEW=1
+  echo "$d $now $(( now + dur )) $max 1 $SID $now" > "$ST/session"
+  log "session start $d plan $(( dur / 60 )) min $max actions${night:+ (night, owner)}"
+}
+# Internal navigations of one command (home page on entry etc.) count as actions too.
+session_tick() { local f=$ST/session; [ -f "$f" ] && awk -v t="$(date +%s)" '{$5++; $7=t; print}' "$f" > "$f.t" && mv "$f.t" "$f"; }
+
+# Human pace. normal: ≤6 navigations/min, 3–8 s gaps. strict: ≤3/min, 8–20 s gaps, ≤STRICT_PER_HOUR per hour on the site.
+# Lines in navs: epoch domain
+pace() {
+  local d=$1 lvl=$2 now; now=$(date +%s)
+  awk -v n="$now" '$1>n-3600' "$ST/navs" > "$ST/navs.t"; mv "$ST/navs.t" "$ST/navs"
+  local per_min=6 gmin=3 gmax=8
+  if [ "$lvl" = strict ]; then
+    per_min=3 gmin=8 gmax=20
+    if [ "$(awk -v d="$d" '$2==d' "$ST/navs" | wc -l)" -ge $STRICT_PER_HOUR ]; then
+      echo "LIMIT $d: $STRICT_PER_HOUR переходов за час — лимит строгого сайта. Продолжить можно через $(( ($(awk -v d="$d" '$2==d {print $1; exit}' "$ST/navs") + 3600 - now) / 60 + 1 )) мин."; exit 5
+    fi
+  fi
+  local recent; recent=$(awk -v n="$now" '$1>n-60' "$ST/navs")
+  if [ "$(grep -c . <<<"$recent")" -ge $per_min ]; then sleep $(( $(head -1 <<<"$recent" | cut -d' ' -f1) + 61 - now )); fi
+  local gap=$(( gmin + RANDOM % (gmax - gmin + 1) )) since=$(( $(date +%s) - $(stat -c %Y "$ST/last") ))
+  [ "$since" -lt "$gap" ] && sleep "$(( gap - since )).$(( RANDOM % 10 ))"
+  echo "$(date +%s) ${d:--}" >> "$ST/navs"; touch "$ST/last"
+}
+
+# --- Human input: planned by human.py, executed as one `batch` (a single CLI call costs ~1.3 s).
+mouse_pos() { cat "$ST/mouse" 2>/dev/null || echo "$(rnd 500 900) $(rnd 250 500)"; }
+run_batch() { ab batch <<<"$1" >/dev/null 2>&1; }
+
+# Click like a person: scroll into view, approach, hover pause, off-centre click; 1 in 12 a near miss first —
+# only where nothing clickable is under the cursor, so the miss can't open another page.
+hclick() {
+  local sel=$1 box bx by bw bh plan json fx fy mx my miss=0
+  ab scrollintoview "$sel" >/dev/null 2>&1
+  box=$(ab get box "$sel" --json 2>/dev/null | jq -r '.data | select(.width > 0) | "\(.x) \(.y) \(.width) \(.height)"')
+  [ -n "$box" ] || return 1
+  read -r bx by bw bh <<<"$box"
+  (( RANDOM % 12 == 0 )) && miss=1
+  plan=$(python3 "$HERE/human.py" click $(mouse_pos) $bx $by $bw $bh $VW $VH $miss)
+  json=$(head -1 <<<"$plan"); read -r fx fy mx my < <(tail -1 <<<"$plan")
+  if [ "$miss" = 1 ] && [ "$(ab eval "(()=>{const e=document.elementFromPoint($mx,$my);return !e||!!e.closest('a,button,input,select,textarea,label,[role=button],[onclick],[tabindex]')})()" 2>/dev/null)" != false ]; then
+    plan=$(python3 "$HERE/human.py" click $(mouse_pos) $bx $by $bw $bh $VW $VH 0)
+    json=$(head -1 <<<"$plan"); read -r fx fy mx my < <(tail -1 <<<"$plan")
+  fi
+  run_batch "$json" || return 1
+  echo "$fx $fy" > "$ST/mouse"
+}
+
+# Type like a person: words, uneven rhythm, a typo now and then fixed with Backspace. Never `fill`.
+# The field is checked afterwards; on a mismatch it is cleared and typed once more.
+htype() {
+  local sel=$1 txt=$2
+  hclick "$sel" || ab focus "$sel" >/dev/null 2>&1 || return 1
+  pause 0 1
+  run_batch "$(python3 "$HERE/human.py" type "$txt")"
+  if [ "$(ab get value "$sel" 2>/dev/null)" != "$txt" ]; then
+    run_batch '[["press","Control+a"],["wait","150"],["press","Backspace"],["wait","400"]]'
+    ab keyboard type "$txt" >/dev/null 2>&1
+  fi
+}
+
+# "Read" the page: wheel impulses with inertia, a few reading pauses, sometimes back up and re-read.
+# strict: 3–5 screens; normal: 1–2.5. Never to the bottom unless asked (`scroll` with px).
+read_page() {
+  local plan; plan=$(python3 "$HERE/human.py" read "$1" $(mouse_pos) $VW $VH)
+  run_batch "$(head -1 <<<"$plan")"
+  tail -1 <<<"$plan" > "$ST/mouse"
+}
+
+# One tab only: links open in place, stray tabs get closed.
+same_tab() { ab eval "document.querySelectorAll('a[target]').forEach(a => a.removeAttribute('target'))" >/dev/null 2>&1; }
+close_extra_tabs() { ab tab list 2>/dev/null | grep -v '^→' | grep -o '^ *\[t[0-9]*\]' | tr -d ' []' | xargs -r -n1 "$0" _tabclose >/dev/null 2>&1; }
+
+BLOCK_RE='Доступ ограничен|Forbidden|Проблемы со связью|Подозрительная активность|нет соединения|убедиться, что имеем дело|проблема с IP|Anti-DDoS|не робот|подтвердите, что вы человек|captcha|капч|Access denied|Too Many Requests|403 Forbidden|429|503 Service'
+TITLE_RE='Доступ ограничен|Похоже, нет соединения|^Captcha$|проблема с IP|Anti-DDoS|не робот|подтвердите, что вы человек|captcha|капч'
+
+looks_blocked() {
+  url=$(ab get url 2>/dev/null); title=$(ab get title 2>/dev/null)
+  local text; text=$(ab get text body 2>/dev/null | head -c 20000)
+  # Error codes count only on near-empty pages; phrases count anywhere in the title or on short pages.
+  grep -qiE "$TITLE_RE" <<<"$title" || { [ ${#text} -lt 1500 ] && grep -qiE "$BLOCK_RE" <<<"$title $text"; }
+}
+
+# Soft block: no hard stub, but the page is not what a normal visitor gets. Prints the reason.
+# 403/429 count only for the site's own document/XHR — ad and counter hosts return them normally.
+soft_reason() {
+  local d=$1 u h p sel reqs
+  u=$(ab get url 2>/dev/null); h=$(host "$u"); p=${u#*://*/}
+  # leaving the domain is suspicious only after open/back/reload — a click may legitimately lead elsewhere
+  [ "$A_ACT" != click ] && case $h in "$d"|*."$d") ;; *) [ "$u" = about:blank ] || { echo "редирект на другой домен ($h)"; return; } ;; esac
+  grep -qiE '(^|/)(blocked|captcha|showcaptcha|sorry)([/?]|$)' <<<"/$p" && { echo "редирект на /${p%%\?*}"; return; }
+  [ "$d" = avito.ru ] && [[ $h == m.* ]] && { echo "мобильная версия при десктопном UA"; return; }
+  reqs=$(ab network requests --json 2>/dev/null)
+  jq -r '.data.requests[]? | .url' <<<"$reqs" 2>/dev/null | sed -E 's|^[a-z]+://([^/:]+).*|\1|' | sort -u >> "$ST/logs/hosts.$d"
+  # 403 only on the page itself: guest-only API calls answer 403 normally (false block 2026-10-25). XHR counts only on 429.
+  local bad; bad=$(jq -r --arg d "$d" '.data.requests[]? | select((.resourceType == "Document" and (.status == 403 or .status == 429))
+      or ((.resourceType == "XHR" or .resourceType == "Fetch") and .status == 429))
+      | select(.url | capture("^[a-z]+://(?<h>[^/:]+)").h | . == $d or endswith("." + $d))
+      | "\(.status) \(.resourceType) \(.url | .[0:100])"' <<<"$reqs" 2>/dev/null | head -1)
+  [ -n "$bad" ] && { echo "$bad"; return; }
+  sel=$(expect_sel "$d")
+  if [ -n "$sel" ] && [[ $u == *[?\&]q=* ]] && [ "$(ab get count "$sel" 2>/dev/null)" = 0 ]; then
+    echo "нет ожидаемых элементов ($sel) на выдаче"; return
+  fi
+}
+
+check_block() {
+  local url title i why d=$1
+  # JS challenges (РТС Anti-DDoS) pass by themselves in ~10 s: give them 24 s before calling it a block.
+  for i in 1 2 3 4 5 6 7; do
+    looks_blocked || break
+    [ "$i" = 7 ] && { BLOCK=hard; jlog_end; blocked "$(host "$url")" "$title"; }
+    sleep 4
+  done
+  why=; [ "$(level "$d")" = strict ] && why=$(soft_reason "$d")
+  if [ -n "$why" ]; then   # suspicion: wait, retry once, then treat as a block
+    log "SOFT $d ($why), retry"; pause 60 120
+    ab reload >/dev/null 2>&1; ab wait --load domcontentloaded >/dev/null 2>&1; pause 2 4
+    why=$(soft_reason "$d")
+    if [ -n "$why" ] || looks_blocked; then BLOCK=soft; jlog_end; blocked "$d" "мягкий блок: ${why:-$title}"; fi
+  fi
+  touch "$ST/last"
+  echo "OK $(ab get title 2>/dev/null) | $(ab get url 2>/dev/null)"
+}
+
+# Forget one site (the block sticks to its cookies/storage) but keep the rest of the warm profile.
+purge_site() {
+  python3 - "$PROFILE/Default/Cookies" "$1" <<'PY'
+import sqlite3, sys
+db, d = sys.argv[1:]
+c = sqlite3.connect(db)
+c.execute("delete from cookies where host_key = ? or host_key like ?", (d, '%.' + d)); c.commit()
+PY
+  # ponytail: localStorage/caches are shared files for all origins, so they go entirely; cookies and history stay
+  rm -rf "$PROFILE"/Default/{LocalStorage*,SessionStorage*,"Service Worker",Cache,"Code Cache"} "$PROFILE"/Default/IndexedDB/*"$1"* 2>/dev/null
+  rm -f "$ST/warm.$1"
+}
+
+blocked() {
+  local d=$1 why=$2 now; now=$(date +%s)
+  local lvl; lvl=$(level "$d"); lvl=${lvl:-normal}
+  local n; n=$(awk -v d="$d" -v t=$((now - 86400)) '$1==d && $3>t' "$ST/blocks" | wc -l)
+  local until=$(( now + 900 + RANDOM % 901 ))                          # 15–30 min
+  [ "$lvl" = strict ] && until=$(( now + 3600 + RANDOM % 3601 ))       # 1–2 h
+  echo "$d $until $now" >> "$ST/blocks"; log "BLOCK $d ($why) #$((n + 1))"
+  [ "$lvl" = strict ] && session_close
+  stop "block $d"
+  [ "$MODE" = home ] || purge_site "$d"   # the home profile is the owner's: never wiped from here
+  if [ "$n" -ge 1 ]; then
+    echo "STOP $d: повторная блокировка за сутки ($why). Прекрати работу с сайтом и сообщи владельцу. Капчу не решать."; exit 4
+  fi
+  echo "BLOCKED $d: $why. Остановлено, данные сайта стёрты (остальной профиль цел), пауза до $(date -d @"$until" +%H:%M), затем один повтор с прогревом. Капчу не решать — сообщи владельцу."; exit 3
+}
+
+# --- Action log: one JSON line per action for report.sh. pause = idle time before the action, dur = its length.
+A_T0= A_ACT= A_SITE= A_HOW= BLOCK=
+jlog_begin() {
+  A_ACT=$1 A_SITE=$2 A_HOW=$3 BLOCK= A_T0=$(date +%s.%N)
+  A_PAUSE=$(awk -v n="$A_T0" -v l="$(cat "$ST/lastact" 2>/dev/null || echo 0)" 'BEGIN{p=n-l; print (l>0 && p<86400) ? int(p) : -1}')
+  [ "$(level "$2")" = strict ] && ab network requests --clear >/dev/null 2>&1
+  return 0
+}
+jlog_end() {
+  [ -n "$A_T0" ] || return 0
+  local t1; t1=$(date +%s.%N)
+  jq -nc --arg ts "$(TZ=Europe/Moscow date -Is)" --argjson t "${t1%.*}" --arg site "$A_SITE" --arg act "$A_ACT" --arg how "$A_HOW" --arg block "$BLOCK" \
+    --arg sid "$SID" --argjson pause "$A_PAUSE" --argjson dur "$(awk -v a="$A_T0" -v b="$t1" 'BEGIN{printf "%.1f", b-a}')" \
+    '{ts:$ts, t:$t, site:$site, act:$act, how:$how, pause:$pause, dur:$dur, block:$block, sid:$sid}' >> "$ST/logs/human-v2.jsonl"
+  echo "$t1" > "$ST/lastact"; A_T0=
+}
+
+# Heavy pages (Avito) can miss the load-event timeout while already shown: count landing on the domain as success.
+nav() { local u=$1 d; d=$(host "$1"); ab open "$u" >/dev/null 2>&1 && return 0
+  case $(host "$(ab get url 2>/dev/null)") in "$d"|*."$d") return 0 ;; esac; return 1; }
+
+# Warm-up before a strict/warm site: neutral RU pages first, then the site's home page, all at a human pace.
+# Redone after a purge and when older than 3 days.
+warm() {
+  local d=$1 f="$ST/warm.$1"
+  [ -f "$f" ] && [ $(( $(date +%s) - $(stat -c %Y "$f") )) -lt 259200 ] && return 0
+  log "warm $d"
+  local u
+  for u in https://ya.ru/ https://dzen.ru/ https://www.gismeteo.ru/; do
+    pace "$(host "$u")" normal; ab open "$u" >/dev/null 2>&1 && read_page normal
+  done
+  touch "$f"
+}
+
+# 10–20 % of sessions start from a search instead of the home page: ya.ru → query → click the result.
+# Any hiccup (captcha, layout) falls back to the home page silently — Yandex is not the target.
+via_search() {
+  local d=$1 q
+  case $d in avito.ru) q=авито ;; *) q=${d%%.*} ;; esac
+  pace ya.ru normal; nav https://ya.ru/ || return 1
+  pause 2 5; looks_blocked && return 1
+  htype 'input[name="text"]' "$q" || return 1
+  pause 0 1; ab press Enter >/dev/null 2>&1; ab wait --load domcontentloaded >/dev/null 2>&1
+  pause 2 4; looks_blocked && return 1
+  read_page normal; same_tab
+  pace "$d" strict; hclick "a[href*=\"$d\"]:not([href*=\"yandex\"])" || return 1
+  ab wait --load domcontentloaded >/dev/null 2>&1; close_extra_tabs
+  case $(host "$(ab get url 2>/dev/null)") in "$d"|*."$d") session_tick; return 0 ;; esac
+  return 1
+}
+
+# Strict and warm sites: never jump straight to a deep link from outside the site — warm up and enter via the home page
+# (strict: sometimes via a search). The previous page of the same site is then the referrer, as for a person.
+# warm = the same entry at the normal pace (measured: WB blocks a cold deep link, passes after warm-up + home page).
+enter() {
+  local url=$1 d=$2 l=${3:-strict}
+  warm "$d" || exit 1
+  if [ "$(host "$(ab get url 2>/dev/null)")" != "$d" ]; then
+    if ! { [ "$l" = strict ] && [ -n "$SESSION_NEW" ] && (( RANDOM % 100 < 15 )) && via_search "$d"; }; then
+      pace "$d" "$l"; nav "https://www.$d/" || exit 1; [ "$l" = strict ] && session_tick
+    fi
+    read_page "$l"; check_block "$d" >/dev/null
+  fi
+  local rest=${url#*://}
+  [[ "$rest" != */?* ]] && { check_block "$d"; return; }   # the home page itself: already there
+  pace "$d" "$l"; nav "$url" || exit 1
+  close_extra_tabs; read_page "$l"; check_block "$d"
+}
+
+# Owner-switchable background warm-up: 2–4 neutral pages a day, ≥10 min apart, 10–20 MSK, never during a session.
+NEUTRAL="https://ya.ru/ https://yandex.ru/pogoda/ https://www.gismeteo.ru/ https://dzen.ru/news https://lenta.ru/ https://ria.ru/"
+dailywarm() {
+  [ -f "$ST/warm.off" ] && exit 0
+  local h; h=$(msk_hour); [ "$h" -ge 10 ] && [ "$h" -lt 20 ] || exit 0
+  [ -f "$ST/session" ] && [ $(( $(date +%s) - $(awk '{print $7}' "$ST/session") )) -lt 2400 ] && exit 0
+  local f=$ST/dailywarm today; today=$(TZ=Europe/Moscow date +%F)
+  local day target done last; read -r day target done last < "$f" 2>/dev/null || true
+  [ "${day:-}" = "$today" ] || { day=$today target=$(rnd 2 4) done=0 last=0; }
+  [ "$done" -lt "$target" ] && [ $(( $(date +%s) - last )) -ge 600 ] || exit 0
+  set -- $NEUTRAL; shift $(( RANDOM % $# )); local u=$1
+  start || exit 1
+  pace "$(host "$u")" normal; ab open "$u" >/dev/null 2>&1 && read_page normal
+  echo "$day $target $(( done + 1 )) $(date +%s)" > "$f"; log "dailywarm $u ($(( done + 1 ))/$target)"
+}
+
+cmd=${1:-status}; shift || true
+case $cmd in
+  status|logs|_watch|_tabclose|sensitive|mark) ;;
+  dailywarm) lock 0 ;;      # cron: skip this round if Iva is using the browser
+  *) lock ;;
+esac
+case $cmd in
+  start) start && echo "OK started" ;;
+  stop) stop manual; echo "OK stopped" ;;
+  restart) stop restart; start && echo "OK restarted" ;;
+  status)
+    echo "mode $MODE; home browser: $(home_up && echo up || echo down) (127.0.0.1:$HOME_CDP)"
+    if [ "$MODE" = home ]; then :; elif running; then echo "running, rss $(rss_mb)MB, idle $(( $(date +%s) - $(stat -c %Y "$ST/last") ))s"; else echo "stopped"; fi
+    echo "profile $(du -sm "$PROFILE" 2>/dev/null | cut -f1)MB; blocks today: $(awk -v t=$(( $(date +%s) - 86400 )) '$3>t {print $1}' "$ST/blocks" | sort | uniq -c | tr '\n' ' ')"
+    [ -f "$ST/session" ] && echo "session: $(awk '{printf "%s %d/%d actions, %d min left", $1, $5, $4, ($3-systime())/60}' "$ST/session")"
+    for f in "$ST"/break.*; do [ -f "$f" ] && [ "$(cat "$f")" -gt "$(date +%s)" ] && echo "break ${f##*/break.} until $(date -d @"$(cat "$f")" +%H:%M)"; done ;;
+  logs) tail -n "${1:-30}" "$ST/logs/ruweb.log" ;;
+  _watch) watch ;;
+  _tabclose) ab tab close "$1" ;;
+  dailywarm) dailywarm ;;
+  sensitive) s=$(site "$1") && echo "yes ${s#* }" || { echo no; exit 1; } ;;
+  mark)
+    d=$(host "$1"); shift
+    grep -qE "^$d(\s|$)" "$ST/sites.txt" || echo "$d  # $(date +%F) ${*:-блок в обычном режиме}" >> "$ST/sites.txt"
+    log "mark $d"; echo "OK $d в списке чувствительных" ;;
+  warm) start || exit 1; d=$(host "$1"); cooldown "$d"; rm -f "$ST/warm.$d"; warm "$d" && echo "OK warmed $d" ;;
+  endsession) session_close; echo "OK session closed" ;;
+  open)
+    d=$(host "$1"); lvl=$(level "$1"); cooldown "$d"
+    M=local; [ "$lvl" = home ] && M=home
+    [ "$M" = "$MODE" ] || { echo "$M" > "$ST/mode"; MODE=$M; }
+    if [ "$lvl" = strict ]; then sd=$(site "$1" | cut -d' ' -f1); session_gate "$sd"; start || exit 1
+      jlog_begin open "$sd" url; enter "$1" "$sd"; jlog_end; exit; fi
+    if [ "$lvl" = warm ]; then sd=$(site "$1" | cut -d' ' -f1); start || exit 1
+      jlog_begin open "$sd" url; enter "$1" "$sd" normal; jlog_end; exit; fi
+    start || exit 1; jlog_begin open "${d}" url; pace "$d" normal
+    nav "$1" || { running && exit 1; start && nav "$1"; } || exit 1
+    close_extra_tabs; read_page normal; check_block "$d"; jlog_end ;;
+  click|back|forward|reload|scroll|type)
+    start || exit 1; cur=$(ab get url); d=$(host "$cur"); lvl=$(level "$cur"); lvl=${lvl:-normal}; cooldown "$d"
+    sd=$(site "$cur" | cut -d' ' -f1); sd=${sd:-$d}
+    [ "$lvl" = strict ] && session_gate "$sd"
+    case $cmd in click) how=click ;; type|scroll) how=- ;; *) how=$cmd ;; esac
+    jlog_begin "$cmd" "$sd" "$how"
+    case $cmd in
+      scroll) read_page "$lvl"; touch "$ST/last"; jlog_end; echo "OK scrolled" ;;
+      type)  # type <selector> <text>
+        sel=$1; shift
+        if [ "$lvl" = strict ]; then htype "$sel" "$*" || exit 1
+        else { ab click "$sel" >/dev/null 2>&1 || ab focus "$sel" >/dev/null; } || exit 1; pause 0 1; ab keyboard type "$*" >/dev/null || exit 1; fi
+        touch "$ST/last"; jlog_end; echo "OK typed" ;;
+      *)
+        pace "$sd" "$lvl"
+        if [ "$cmd" = click ]; then same_tab
+          if [ "$lvl" = strict ]; then hclick "$1" || ab click "$@" >/dev/null || exit 1; else ab click "$@" >/dev/null || exit 1; fi
+        else ab "$cmd" "$@" >/dev/null || exit 1; fi
+        ab wait --load domcontentloaded >/dev/null 2>&1; close_extra_tabs; read_page "$lvl"; check_block "$sd"; jlog_end ;;
+    esac ;;
+  *) start || exit 1; touch "$ST/last"; ab "$cmd" "$@" ;;
+esac

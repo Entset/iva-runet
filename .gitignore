@@ -1,0 +1,4 @@
+*.key
+*.log
+*.bak*
+__pycache__/

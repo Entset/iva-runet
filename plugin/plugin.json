@@ -1,0 +1,6 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "runet",
+  "version": "1.0.0",
+  "description": "Российские сайты для Ивы на зарубежном VPS: браузер ruweb (постоянный профиль, человеческий темп, детектор блоков) и управление домашним Chrome для сайтов со строгим антиботом."
+}
