@@ -9,8 +9,11 @@ HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 ST=${RUWEB_HOME:-$HOME/.iva-browser}
 PROFILE=$ST/profile
 IDLE_MAX=1800      # stop the browser after 30 min without use
-RSS_MAX_MB=1000    # Chrome PSS ceiling; Camoufox below (≈1.6 GB on an empty page, driver and Xvfb included); ponytail: checked once a minute by the watchdog, cgroup MemoryMax needs root/systemd
-RSS_MAX_FOX_MB=2300   # 3.9 GB VPS, ~1.1 GB used without a browser
+RSS_MAX_MB=1000    # Chrome PSS ceiling; ponytail: checked once a minute by the watchdog, cgroup MemoryMax needs root/systemd
+RSS_MAX_FOX_MB=2300   # Camoufox ≈1.6 GB on an empty page, driver and Xvfb included
+FOX=1 FOX_WHY=
+# `ruweb setup` fits the three above to this server (free RAM/disk) and writes them here
+[ -f "${RUWEB_HOME:-$HOME/.iva-browser}/config" ] && . "${RUWEB_HOME:-$HOME/.iva-browser}/config"
 STRICT_PER_HOUR=40 # navigations per hour on one strict site
 SESS_PER_HOUR=3 SESS_PER_DAY=8   # strict-site sessions
 VW=1440 VH=757                   # viewport (window 1440x900)
@@ -117,7 +120,7 @@ captcha() {
   [ -f "$ST/vnc.pass" ] || { echo "NO_VNC_PASS: владелец один раз задаёт пароль в своём терминале: x11vnc -storepasswd $ST/vnc.pass"; exit 9; }
   local u=${1:-} d disp auth
   if [ -n "$u" ]; then   # owner-driven: no cooldown, no pace, no detector — a person is about to look at it
-    d=$(host "$u"); M=local; [ "$(level "$u")" = fox ] && M=fox
+    d=$(host "$u"); M=local; [ "$(level "$u")" = fox ] && { fox_ok "$d"; M=fox; }
     if [ "$M" != "$MODE" ]; then stop "switch to $M"; echo "$M" > "$ST/mode"; MODE=$M
       PROFILE=$ST/profile; [ "$M" = fox ] && PROFILE=$ST/fox-profile; fi
     start || exit 1; nav "$u" || exit 1
@@ -456,13 +459,68 @@ dailywarm() {
   echo "$day $target $(( done + 1 )) $(date +%s)" > "$f"; log "dailywarm $u ($(( done + 1 ))/$target)"
 }
 
+fox_ok() { [ "$FOX" = 1 ] || { echo "FOX_OFF $1: сайт открывается только в Camoufox, а на этом сервере он выключен ($FOX_WHY). Сообщи владельцу."; exit 8; }; }
+
+# --- Fit ruweb to this server: memory ceilings from free RAM, Camoufox only if RAM and disk allow, installs what needs no sudo.
+# Runs by itself on first use; again by hand after a server change. Idempotent.
+setup() {
+  local nofox=${1:-} miss= c avail disk budget fox=0 why= pkgs= sudo_cmd= vps ru net
+  for c in agent-browser python3 flock curl; do command -v $c >/dev/null || miss="$miss $c"; done
+  [ -n "$VER" ] || miss="$miss Chrome-от-agent-browser"
+  [ -z "$miss" ] || { echo "SETUP_FAIL: нет:$miss — ставится вместе с Ивой (agent-browser install); без этого ruweb не работает."; exit 1; }
+  running && stop setup   # measure free memory without our own browser
+  avail=$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo)
+  disk=$(df -Pm "$HOME" | awk 'NR==2 {print $4}')
+  budget=$(( avail - 400 ))   # 400 MB stays for Iva and the system
+  [ "$budget" -ge 500 ] || { echo "SETUP_FAIL: свободно ${avail} МБ памяти, браузеру нужно от 900 МБ."; exit 1; }
+  # Window instead of headless (fewer bot tells; Camoufox and the owner's captcha window need it)
+  command -v Xvfb >/dev/null || pkgs=xvfb; command -v x11vnc >/dev/null || pkgs="$pkgs x11vnc"
+  if [ -n "$pkgs" ]; then sudo -n apt-get install -y -q $pkgs >>"$ST/logs/setup.log" 2>&1 || sudo_cmd="sudo apt install -y$pkgs"; fi
+  if [ "$nofox" = --no-fox ]; then why="отключён владельцем"
+  elif ! command -v Xvfb >/dev/null; then why="нужен Xvfb"
+  elif [ "$budget" -lt 1900 ]; then why="мало памяти: свободно ${avail} МБ, Camoufox берёт ~1.6 ГБ"
+  elif ls "$HOME"/.cache/camoufox/browsers/*/*/camoufox-bin >/dev/null 2>&1 && "$ST/camoufox/venv/bin/python" -c 'import camoufox' 2>/dev/null; then fox=1
+  elif [ "$disk" -lt 3500 ]; then why="мало места на диске: свободно ${disk} МБ, Camoufox занимает ~2.8 ГБ"
+  else
+    echo "ставлю Camoufox (~2.8 ГБ, 2–5 мин)…" >&2
+    PATH=$HOME/.local/bin:$PATH
+    { command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+      [ -x "$ST/camoufox/venv/bin/python" ] || uv venv "$ST/camoufox/venv"
+      uv pip install -p "$ST/camoufox/venv/bin/python" "camoufox[geoip]" && "$ST/camoufox/venv/bin/python" -m camoufox fetch
+    } >>"$ST/logs/setup.log" 2>&1 && fox=1 || why="установка не удалась, см. $ST/logs/setup.log"
+  fi
+  cat > "$ST/config" <<EOF
+# \`ruweb setup\` $(date '+%F %T'): ${avail} MB RAM free, ${disk} MB disk free. Rerun after a server change.
+RSS_MAX_MB=$(( budget > 1000 ? 1000 : budget ))
+RSS_MAX_FOX_MB=$(( budget > 3000 ? 3000 : budget ))
+FOX=$fox FOX_WHY="$why"
+EOF
+  . "$ST/config"
+  # Which IP Russian sites see: a RU address answers through the tunnel if there is one
+  vps=$(curl -4 -s -m 8 https://ifconfig.me/ip); ru=$(curl -4 -s -m 8 https://ipv4-internet.yandex.net/api/v0/ip | tr -d '"')
+  if [ -z "$ru" ]; then net="WARN: ipv4-internet.yandex.net не ответил — российские сайты недоступны с сервера"
+  elif [ "$ru" != "$vps" ]; then net="российский IP через туннель: $ru"
+  elif [ "$(curl -s -m 8 "https://ipinfo.io/$vps/country")" = RU ]; then net="VPS в России ($vps), туннель не нужен"
+  else net="WARN: российские сайты видят зарубежный IP $vps — нужен туннель (SETUP.md, шаги 2–4)"; fi
+  log "setup: chrome ${RSS_MAX_MB}MB, fox=$FOX ${FOX_WHY}; $net"
+  echo "OK setup: Chrome до ${RSS_MAX_MB} МБ; Camoufox: $([ "$FOX" = 1 ] && echo "да, до ${RSS_MAX_FOX_MB} МБ" || echo "нет — $FOX_WHY")"
+  echo "$net"
+  [ -n "$sudo_cmd" ] && echo "владельцу (одна команда, затем ruweb setup ещё раз): $sudo_cmd"
+  [ -f "$ST/vnc.pass" ] || echo "окно для капчи: владелец один раз задаёт пароль VNC в своём терминале: x11vnc -storepasswd $ST/vnc.pass"
+  return 0
+}
+
 cmd=${1:-status}; shift || true
 case $cmd in
   status|logs|_watch|_tabclose|sensitive|mark) ;;
   dailywarm) lock 0 ;;      # cron: skip this round if Iva is using the browser
   *) lock ;;
 esac
+# first use on this server: fit to it before anything opens
+[ -f "$ST/config" ] || case $cmd in setup|status|logs|stop|_watch|_tabclose|sensitive|mark|dailywarm) ;;
+  *) echo "первый запуск: подстраиваю ruweb под этот сервер…" >&2; setup >&2 ;; esac
 case $cmd in
+  setup) setup "${1:-}" ;;
   start) start && echo "OK started" ;;
   stop) stop manual; echo "OK stopped" ;;
   restart) stop restart; start && echo "OK restarted" ;;
@@ -486,7 +544,7 @@ case $cmd in
   captcha) if [ "${1:-}" = done ]; then captcha_done; else captcha "${1:-}"; fi ;;
   open)
     captcha_wait; d=$(host "$1"); lvl=$(level "$1"); cooldown "$d"
-    M=local; [ "$lvl" = fox ] && M=fox
+    M=local; [ "$lvl" = fox ] && { fox_ok "$d"; M=fox; }
     if [ "$M" != "$MODE" ]; then stop "switch to $M"; echo "$M" > "$ST/mode"; MODE=$M   # RAM: one engine at a time
       PROFILE=$ST/profile; [ "$M" = fox ] && PROFILE=$ST/fox-profile; fi
     if [ "$lvl" = strict ]; then sd=$(site "$1" | cut -d' ' -f1); session_gate "$sd"; start || exit 1

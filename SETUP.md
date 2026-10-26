@@ -30,7 +30,7 @@
    - ничего / туннель не нужен (VPS уже в России) → пропустить шаги 2–4.
    Если вариантов несколько: роутер (OpenWrt/Keenetic/MikroTik) > Linux 24/7 > телефон > ПК.
 2. Нужно ли открывать **zakupki.gov.ru и госсайты** (потребуется доверие к сертификату Минцифры — решение владельца).
-3. Нужны ли **Самокат, Перекрёсток, Ozon** (ставится Camoufox, ~700 МБ на диске, ~550 МБ RAM во время работы).
+3. Нужны ли **Самокат, Перекрёсток, Ozon** (Camoufox: ~2.8 ГБ на диске, ~1.6 ГБ RAM во время работы; `ruweb setup` ставит его сам, если хватает — «нет» = `ruweb setup --no-fox`).
 
 ## 1. Проверка сервера
 
@@ -40,11 +40,11 @@ ip -4 route show default                 # внешний интерфейс VPS
 ip rule show                             # приоритеты 100–102 должны быть свободны
 ls /etc/iva/tunnel.env 2>/dev/null       # уже стоит? тогда bash tunnel/server/check.sh и не ставить заново
 command -v iva agent-browser jq python3 flock curl
-free -m                                  # Chrome берёт 300–1000 МБ; меньше ~1.5 ГБ свободной — предупредить
-curl -s https://ifconfig.me/ip; curl -s -A curl https://2ip.ru   # IP VPS
+free -m; df -h ~                         # Chrome 300–1000 МБ; Camoufox ~1.6 ГБ RAM и ~2.8 ГБ диска (ruweb setup решит сам)
+curl -4 -s https://ifconfig.me/ip; curl -4 -s https://ipv4-internet.yandex.net/api/v0/ip   # IP VPS / IP для российских сайтов
 ```
 
-Готово, если: Debian/Ubuntu, есть `iva` и `agent-browser`. Если 2ip.ru уже показывает российский IP — туннель не нужен.
+Готово, если: Debian/Ubuntu, есть `iva` и `agent-browser`. Если ipv4-internet.yandex.net уже показывает российский IP — туннель не нужен.
 
 Склонировать репозиторий на сервер (ссылку дал владелец):
 
@@ -80,7 +80,7 @@ sudo bash tunnel/server/install-ssh-socks.sh
 sudo bash tunnel/server/enable-routes.sh
 ```
 
-Готово, если: ifconfig.me = IP VPS, 2ip.ru = домашний (или мобильный) IP, ya.ru/gosuslugi отвечают, текущая SSH-сессия жива.
+Готово, если: ifconfig.me = IP VPS, ipv4-internet.yandex.net = домашний (или мобильный) IP, ya.ru/gosuslugi отвечают, текущая SSH-сессия жива.
 Если SSH оборвался — владелец заходит заново (входящие должны работать), `sudo systemctl disable --now iva-ru-routes.timer; sudo ip route flush table 100` и разбираться с `WAN` в `/etc/iva/tunnel.env`.
 
 ## 5. Плагин (терминал, владелец или Claude Code)
@@ -104,28 +104,24 @@ iva plugin list | grep runet
 
 ```bash
 R=data/custom/plugins/runet/skills/ru-web/scripts/ruweb
+$R setup                                # подстроиться под сервер (сам запускается при первом вызове); «нет» на вопрос 3 → $R setup --no-fox
 $R sensitive https://www.avito.ru/      # yes strict
 $R open https://ya.ru/                  # OK Яндекс | https://ya.ru/
 $R status; $R stop
 ```
 
+Готово, если: `setup` ответил `OK setup`, в ответе нет `WARN`. `setup` без sudo ставит Camoufox (если хватает памяти и диска), а если
+не хватает пакетов (`xvfb`, `x11vnc`) — печатает одну команду с `sudo` для владельца; после неё `$R setup` ещё раз.
+Camoufox проверить: `$R open https://www.ozon.ru/` → `OK Ozon …`, `$R status` → `engine fox`.
+
 ## 6. Дополнительно
 
-- **Camoufox** (вопрос 3) — без sudo:
-  ```bash
-  command -v uv || curl -LsSf https://astral.sh/uv/install.sh | sh
-  uv venv ~/.iva-browser/camoufox/venv && uv pip install -p ~/.iva-browser/camoufox/venv/bin/python "camoufox[geoip]"
-  ~/.iva-browser/camoufox/venv/bin/python -m camoufox fetch
-  ```
-  Нужен Xvfb (`sudo apt install -y xvfb`, см. ниже). Готово, если: `$R open https://www.ozon.ru/` → `OK Ozon …`, `$R status` → `engine fox`.
-
-- **Окно для владельца** (капча, вход в аккаунт) — `x11vnc` (`sudo apt install -y x11vnc`), пароль владелец задаёт сам
+- **Окно для владельца** (капча, вход в аккаунт) — `x11vnc` (ставит `setup`), пароль владелец задаёт сам
   в своём терминале: `x11vnc -storepasswd ~/.iva-browser/vnc.pass` (не печатать и не просить в чат).
   Готово, если: `$R captcha https://ya.ru/` → `CAPTCHA_OWNER`, владелец видит окно, `$R captcha done` → `OK`.
 - **Госсайты** (вопрос 2): `data/custom/plugins/runet/skills/ru-web/scripts/trust-ru-ca.sh` — доверие к сертификату
   Минцифры для браузера; скрипт печатает, что ещё сделать для Node (web_fetch) и системы. Это корневой сертификат для всех сайтов —
   только с явного «да» владельца.
-- **Окно браузера вместо headless** (меньше признаков бота): `sudo apt install -y xvfb` — ruweb подхватит сам.
 - Необязательно — **фоновые заходы** на нейтральные страницы 2–4 раза в день: `crontab -e` →
   `*/10 * * * * $HOME/iva/data/custom/plugins/runet/skills/ru-web/scripts/ruweb dailywarm >/dev/null 2>&1`.
 - Был `~/.iva-browser/sites.txt` от старой версии — сравнить с `scripts/sites.txt` плагина (свой файл не перетирается).

@@ -12,5 +12,5 @@ echo "таймер: $(systemctl is-active iva-ru-routes.timer)"
 echo "RU-маршрутов в таблице 100: $(ip route show table 100 | wc -l) (0 = выход не работает, Ива ходит напрямую)"
 echo "маршрут до ya.ru: $(ip route get 77.88.8.8 | head -1)"
 echo "IP для обычных сайтов:    $(curl -s --max-time 10 https://ifconfig.me/ip)"
-echo "IP для российских сайтов: $(curl -s --max-time 15 -A curl https://2ip.ru)"
+echo "IP для российских сайтов: $(curl -4 -s --max-time 15 https://ipv4-internet.yandex.net/api/v0/ip)"
 journalctl -u iva-ru-routes.service -n 3 --no-pager -o cat 2>/dev/null
