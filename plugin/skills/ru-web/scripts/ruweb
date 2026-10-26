@@ -9,7 +9,8 @@ HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 ST=${RUWEB_HOME:-$HOME/.iva-browser}
 PROFILE=$ST/profile
 IDLE_MAX=1800      # stop the browser after 30 min without use
-RSS_MAX_MB=1000    # Chrome PSS ceiling; ponytail: checked once a minute by the watchdog, cgroup MemoryMax needs root/systemd
+RSS_MAX_MB=1000    # Chrome PSS ceiling; Camoufox below (≈1.6 GB on an empty page, driver and Xvfb included); ponytail: checked once a minute by the watchdog, cgroup MemoryMax needs root/systemd
+RSS_MAX_FOX_MB=2300   # 3.9 GB VPS, ~1.1 GB used without a browser
 STRICT_PER_HOUR=40 # navigations per hour on one strict site
 SESS_PER_HOUR=3 SESS_PER_DAY=8   # strict-site sessions
 VW=1440 VH=757                   # viewport (window 1440x900)
@@ -43,7 +44,11 @@ pause() { sleep "$(( $1 + RANDOM % ($2 - $1 + 1) )).$(( RANDOM % 10 ))"; }  # ra
 PAT() { [ "$MODE" = fox ] && echo "$PROFILE( |$)" || echo "--user-data-dir=$PROFILE( |$)"; }
 running() { pgrep -f -- "$(PAT)" >/dev/null; }
 # PSS (shared pages split between processes), so the sum is real memory use.
-rss_mb() { pgrep -f -- "$(PAT)" | sed 's|.*|/proc/&/smaps_rollup|' | xargs -r awk '/^Pss:/ {s+=$2} END{print int(s/1024)}' 2>/dev/null || echo 0; }
+# Camoufox content processes don't carry the profile path, so count whole sessions of what does:
+# fox.py's (Xvfb, playwright driver) and camoufox-bin's own (the driver starts it detached, with its content processes).
+pids() { local s; [ "$MODE" = fox ] || { pgrep -f -- "$(PAT)"; return; }
+  s=$(pgrep -f -- "$(PAT)" | xargs -r ps -o sid= -p | tr -d ' ' | sort -u | paste -sd,) && [ -n "$s" ] && pgrep -s "$s"; }
+rss_mb() { pids | sed 's|.*|/proc/&/smaps_rollup|' | xargs -r awk '/^Pss:/ {s+=$2} END{print int(s/1024)}' 2>/dev/null || echo 0; }
 
 # One browser, one owner. The kernel drops the lock when the holder dies, so it can't go stale.
 lock() {
@@ -139,10 +144,13 @@ captcha_done() {
 
 watch() {
   while sleep 60; do
+    # `open` may have switched engines since this watcher started: watch whichever one runs now
+    MODE=$(cat "$ST/mode" 2>/dev/null || echo local); PROFILE=$ST/profile; [ "$MODE" = fox ] && PROFILE=$ST/fox-profile
     running || exit 0
     [ -f "$ST/captcha" ] && touch "$ST/last"   # the owner is in the window: not idle
     [ $(( $(date +%s) - $(stat -c %Y "$ST/last") )) -gt $IDLE_MAX ] && { stop idle; exit 0; }
-    [ "$(rss_mb)" -gt $RSS_MAX_MB ] && { stop "rss $(rss_mb)MB"; exit 0; }
+    max=$RSS_MAX_MB; [ "$MODE" = fox ] && max=$RSS_MAX_FOX_MB
+    [ "$(rss_mb)" -gt $max ] && { stop "rss $(rss_mb)MB"; exit 0; }
   done
 }
 
