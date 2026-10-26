@@ -144,9 +144,9 @@ def run(page, mouse, argv, stdin):
     if cmd == "scroll":
         dy = int(rest[1]) if len(rest) > 1 else 600
         page.mouse.wheel(0, -dy if rest[:1] == ["up"] else dy); return "✓"
-    if cmd == "screenshot":
-        path = rest[0] if rest else os.path.join(ST, "logs", "fox.png")
-        page.screenshot(path=path); return path
+    if cmd == "screenshot":   # [selector] [path], like agent-browser
+        s, path = rest if len(rest) == 2 else (None, rest[0] if rest else os.path.join(ST, "logs", "fox.png"))
+        (page.locator(sel(s)).first.screenshot if s else page.screenshot)(path=path); return path
     if cmd == "set" and rest[0] == "viewport":
         page.set_viewport_size({"width": int(rest[1]), "height": int(rest[2])}); return "✓"
     if cmd == "batch":   # human.py plans: wait / mouse move|down|up|wheel / press / keyboard type
