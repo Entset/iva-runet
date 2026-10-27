@@ -9,7 +9,7 @@ HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 ST=${RUWEB_HOME:-$HOME/.iva-browser}
 PROFILE=$ST/profile
 IDLE_MAX=1800      # stop the browser after 30 min without use
-RSS_MAX_MB=1000    # Chrome PSS ceiling; ponytail: checked once a minute by the watchdog, cgroup MemoryMax needs root/systemd
+RSS_MAX_MB=1800    # Chrome PSS ceiling (Chrome 152 on WB: 1.1–1.4 GB); ponytail: checked once a minute by the watchdog, cgroup MemoryMax needs root/systemd
 RSS_MAX_FOX_MB=2300   # Camoufox ≈1.6 GB on an empty page, driver and Xvfb included
 FOX=1 FOX_WHY=
 # `ruweb setup` fits the three above to this server (free RAM/disk) and writes them here
@@ -491,7 +491,7 @@ setup() {
   fi
   cat > "$ST/config" <<EOF
 # \`ruweb setup\` $(date '+%F %T'): ${avail} MB RAM free, ${disk} MB disk free. Rerun after a server change.
-RSS_MAX_MB=$(( budget > 1000 ? 1000 : budget ))
+RSS_MAX_MB=$(( budget > 1800 ? 1800 : budget ))
 RSS_MAX_FOX_MB=$(( budget > 3000 ? 3000 : budget ))
 FOX=$fox FOX_WHY="$why"
 EOF
@@ -545,7 +545,12 @@ case $cmd in
   open)
     captcha_wait; d=$(host "$1"); lvl=$(level "$1"); cooldown "$d"
     M=local; [ "$lvl" = fox ] && { fox_ok "$d"; M=fox; }
-    if [ "$M" != "$MODE" ]; then stop "switch to $M"; echo "$M" > "$ST/mode"; MODE=$M   # RAM: one engine at a time
+    if [ "$M" != "$MODE" ]; then
+      # Another chat task may be mid-way on the other engine: switching would kill its page under it.
+      # ponytail: "used <90 s ago" stands in for an owner id; per-task ownership if two tasks still collide
+      running && [ $(( $(date +%s) - $(stat -c %Y "$ST/last") )) -lt 90 ] && {
+        echo "BUSY: браузер ($MODE) сейчас занят другим запросом. Подожди 90 с и повтори open; не делай stop/restart — это убьёт чужую страницу."; exit 6; }
+      stop "switch to $M"; echo "$M" > "$ST/mode"; MODE=$M   # RAM: one engine at a time
       PROFILE=$ST/profile; [ "$M" = fox ] && PROFILE=$ST/fox-profile; fi
     if [ "$lvl" = strict ]; then sd=$(site "$1" | cut -d' ' -f1); session_gate "$sd"; start || exit 1
       jlog_begin open "$sd" url; enter "$1" "$sd"; jlog_end; exit; fi
