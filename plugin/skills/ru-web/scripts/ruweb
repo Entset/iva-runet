@@ -562,6 +562,10 @@ setup() {
   [ -x "$ST/http/venv/bin/websockify" ] || { PATH=$HOME/.local/bin:$PATH; uv pip install -q -p "$HTTP_PY" websockify >>"$ST/logs/setup.log" 2>&1; }
   [ -f "$ST/novnc/vnc.html" ] || { mkdir -p "$ST/novnc" && curl -sfL https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz \
     | tar xz -C "$ST/novnc" --strip-components=1; } >>"$ST/logs/setup.log" 2>&1
+  # Phone: long press = left button, not right (right opened the browser's own menu over the captcha);
+  # a drag starts after 10 px, not 50 (fine slider moves). Idempotent.
+  sed -i "/case 'longpress':/,/break;/ s/0x4)/0x1)/" "$ST/novnc/core/rfb.js" 2>/dev/null
+  sed -i 's/^const GH_MOVE_THRESHOLD = 50;/const GH_MOVE_THRESHOLD = 10;/' "$ST/novnc/core/input/gesturehandler.js" 2>/dev/null
   cat > "$ST/config" <<EOF
 # \`ruweb setup\` $(date '+%F %T'): ${avail} MB RAM free, ${disk} MB disk free. Rerun after a server change.
 RSS_MAX_MB=$(( budget > 1800 ? 1800 : budget ))
