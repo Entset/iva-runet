@@ -136,7 +136,9 @@ $R back
 - **ВкусВилл** — только MCP ВкусВилла (`connection_search` «vkusvill» → `vkusvill_products_search`, `vkusvill_cart_link_create`), не браузер.
 - **HTTP (`$R fetch`, быстро):** Яндекс Лавка `lavka.yandex.ru/search?text=<q>`, Глобус `globus.ru/search?q=<q>`, Метро `online.metro-cc.ru/search?q=<q>`.
 - **Chrome (`$R open`):** Магнит `magnit.ru/search?term=<q>`, Дикси `dixy.ru/catalog/?q=<q>`, Fix Price `fix-price.com/search?q=<q>`.
-- **Camoufox, часто проверка (ссылка владельцу):** Перекрёсток, Пятёрочка, Самокат, Окей, Чижик, Купер (ServicePipe); Лента, Ашан, Утконос (Qrator режет Chrome 403).
+- **Camoufox (Qrator режет Chrome 403), проверка не нужна:** Ашан `auchan.ru/search/?query=<q>`; Лента, Утконос — через поле поиска на сайте
+  (Утконос — `utkonos.ru/search/<q>/`).
+- **Camoufox, часто проверка (ссылка владельцу):** Перекрёсток, Пятёрочка, Самокат, Окей, Чижик, Купер (ServicePipe).
   Заходить только по задаче владельца и по одному сайту за раз; на «Forbidden» без капчи — сегодня больше не трогать.
 - Сравнение цен: начинай с MCP/HTTP-магазинов, браузерные — только если владелец назвал их или нужного товара нет.
 
