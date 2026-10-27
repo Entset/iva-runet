@@ -133,7 +133,7 @@ $R back
 
 ## Продукты (проверено 2026-10-27, домашний IP)
 
-- **ВкусВилл** — только MCP `vkusvill` (connection_search → `vkusvill_products_search`, `vkusvill_cart_link_create`), не браузер.
+- **ВкусВилл** — только MCP ВкусВилла (`connection_search` «vkusvill» → `vkusvill_products_search`, `vkusvill_cart_link_create`), не браузер.
 - **HTTP (`$R fetch`, быстро):** Яндекс Лавка `lavka.yandex.ru/search?text=<q>`, Глобус `globus.ru/search?q=<q>`, Метро `online.metro-cc.ru/search?q=<q>`.
 - **Chrome (`$R open`):** Магнит `magnit.ru/search?term=<q>`, Дикси `dixy.ru/catalog/?q=<q>`, Fix Price `fix-price.com/search?q=<q>`.
 - **Camoufox, часто проверка (ссылка владельцу):** Перекрёсток, Пятёрочка, Самокат, Окей, Чижик, Купер (ServicePipe); Лента, Ашан, Утконос (Qrator режет Chrome 403).

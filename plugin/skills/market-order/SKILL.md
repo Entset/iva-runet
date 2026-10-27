@@ -55,7 +55,7 @@ market-order.sh state-save         # cookies -> ~/.config/market-order/state-wb.
 | «следи за ценой X» | Маркет: MCP + schedule (без браузера). WB: браузер, реже — 04-monitor |
 | «положи в корзину», «собери корзину» | Браузер (ruweb): GUEST/AUTH — 02-market / 03-wb |
 | «войди в WB» | AUTH-цикл `login` выше; капча — `ruweb captcha` и ссылка владельцу |
-| «закажи продукты», продуктовые сети | ВкусВилл — MCP `vkusvill`; остальные — HTTP/Chrome/Camoufox по карте 06-food |
+| «закажи продукты», продуктовые сети | ВкусВилл — MCP ВкусВилла (`connection_search` «vkusvill»); остальные — HTTP/Chrome/Camoufox по карте 06-food |
 
 ## Шаг 0. Стадия
 

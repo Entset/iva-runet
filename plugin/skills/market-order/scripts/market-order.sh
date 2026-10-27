@@ -25,7 +25,7 @@ STATE_MARKET="$DIR/state.json"          # cookies Яндекса для Марк
 STATE_WB="$DIR/state-wb.json"           # вход WB (см. login/state-save)
 TAXI_STATE="${TAXI_STATE:-$HOME/.config/yandex-taxi-skill/state.json}"
 TMP="${MARKET_ORDER_TMP:-/tmp/market-order}"
-RUWEB="${RUWEB:-$HOME/iva/data/custom/plugins/ru-web/skills/ru-web/scripts/ruweb}"
+RUWEB="${RUWEB:-}"   # empty: need_ruweb finds it
 
 PHONE_WB=""; DEFAULT_MODE=GUEST
 [ -f "$CONF" ] && . "$CONF"

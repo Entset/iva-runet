@@ -37,7 +37,7 @@
 
 | Площадка | Как | Поиск | Результат |
 |---|---|---|---|
-| ВкусВилл | MCP `vkusvill` | `vkusvill_products_search` → `vkusvill_cart_link_create` (до 100 позиций) | официальный, без входа; наличие и история — после OAuth владельца |
+| ВкусВилл | MCP ВкусВилла (`connection_search` «vkusvill») | `vkusvill_products_search` → `vkusvill_cart_link_create` (до 100 позиций) | официальный, без входа; наличие и история — после OAuth владельца |
 | Яндекс Лавка | `ruweb fetch` (HTTP) | `lavka.yandex.ru/search?text=<q>` | цены видны без адреса; корзина — браузер + вход Яндекса |
 | Глобус | `ruweb fetch` | `globus.ru/search?q=<q>` | 64 товара с ценами |
 | Метро | `ruweb fetch` | `online.metro-cc.ru/search?q=<q>` | товары видны |
