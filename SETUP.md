@@ -90,14 +90,17 @@ iva plugin add <owner>/iva-runet/plugin        # owner/repo/подпапка и�
 iva plugin list | grep runet
 ```
 
-Скиллы работают со следующего хода, сборка и рестарт не нужны. Стоит старый плагин `ru-web` (до переименования) —
+Скиллы (`ru-web`, `market-order`) работают со следующего хода, сборка и рестарт не нужны.
+MCP ВкусВилла (`plugin/mcp.json`) включается отдельно, с согласия владельца: `iva plugin trust runet` — Ива пересоберётся
+и перезапустится, подключение появится как `mcp-runet--vkusvill`. Если ВкусВилл уже подключён своим файлом
+в `data/custom/agent/connections/` — не включать (будут два одинаковых подключения). Стоит старый плагин `ru-web` (до переименования) —
 сначала `iva plugin remove ru-web`, иначе `add` откажет из-за одинаковых имён навыков. Если у Ивы уже есть свой скилл с таким же именем
 в `data/custom/agent/skills/` (`ru-web`) — он побеждает плагин: сравнить и убрать старый с согласия владельца.
 
 Правило в `~/iva/data/custom/agent/instructions/rules.md` (дописать одной строкой, если такой ещё нет):
 
 ```
-- Российский поиск и сайты — навык ru-web: поиск про РФ — `ruweb search` вместе с web_search; российские страницы — `ruweb fetch` (сам выбирает HTTP или браузер); чувствительные сайты — только через ruweb; блок или капча — стоп и сообщить.
+- Российский поиск и сайты — навык ru-web: поиск про РФ — `ruweb search` вместе с web_search; российские страницы — `ruweb fetch` (сам выбирает HTTP или браузер); чувствительные сайты — только через ruweb; капча на сайте, который назвал владелец, — `ruweb captcha <url>` и ссылку ему; покупки и продукты — навык market-order.
 ```
 
 Проверка (из `~/iva`):
@@ -122,6 +125,9 @@ Camoufox проверить: `$R open https://www.ozon.ru/` → `OK Ozon …`, `
   работает Caddy с HTTPS-доменом и локальным admin API (`localhost:2019`, по умолчанию включён); домен берётся из конфига Caddy
   или из `RUWEB_PUBLIC_HOST` в `~/.iva-browser/config`. Без Caddy — через `ssh -L` (пароль одноразовый, в ответе).
   Готово, если: `$R captcha https://ya.ru/` → `CAPTCHA_OWNER` со ссылкой, ссылка открывает окно, `$R captcha done` → `OK`.
+- **Покупки** (`market-order`): `cp data/custom/plugins/runet/skills/market-order/config.example.env ~/.config/market-order/config.env`,
+  `chmod 600`, вписать адрес доставки и лимит. Поиск по Маркету быстрее с MCP [ru-marketplace-mcp](https://github.com/RikaKit2/ru-marketplace-mcp-rs)
+  (коннектор `marketplace`); без него навык ищет браузером.
 - **Госсайты** (вопрос 2): `data/custom/plugins/runet/skills/ru-web/scripts/trust-ru-ca.sh` — доверие к сертификату
   Минцифры для браузера; скрипт печатает, что ещё сделать для Node (web_fetch) и системы. Это корневой сертификат для всех сайтов —
   только с явного «да» владельца.
