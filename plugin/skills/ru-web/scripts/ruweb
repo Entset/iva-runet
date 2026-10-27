@@ -545,11 +545,14 @@ case $cmd in
   open)
     captcha_wait; d=$(host "$1"); lvl=$(level "$1"); cooldown "$d"
     M=local; [ "$lvl" = fox ] && { fox_ok "$d"; M=fox; }
+    # Another chat task may be mid-way on another site or engine: opening ours would take its page from under it.
+    # ponytail: "other site used <90 s ago" stands in for an owner id; two tasks on the SAME site still collide
+    k=$(site "$1" | cut -d' ' -f1); k=${k:-$d}
+    if { [ "$M" != "$MODE" ] || [ "$k" != "$(cat "$ST/site" 2>/dev/null)" ]; } && running \
+       && [ $(( $(date +%s) - $(stat -c %Y "$ST/last") )) -lt 90 ]; then
+      echo "BUSY: браузер ($MODE, $(cat "$ST/site" 2>/dev/null)) сейчас занят другим запросом. Подожди 90 с и повтори open; не делай stop/restart — это убьёт чужую страницу."; exit 6; fi
+    echo "$k" > "$ST/site"
     if [ "$M" != "$MODE" ]; then
-      # Another chat task may be mid-way on the other engine: switching would kill its page under it.
-      # ponytail: "used <90 s ago" stands in for an owner id; per-task ownership if two tasks still collide
-      running && [ $(( $(date +%s) - $(stat -c %Y "$ST/last") )) -lt 90 ] && {
-        echo "BUSY: браузер ($MODE) сейчас занят другим запросом. Подожди 90 с и повтори open; не делай stop/restart — это убьёт чужую страницу."; exit 6; }
       stop "switch to $M"; echo "$M" > "$ST/mode"; MODE=$M   # RAM: one engine at a time
       PROFILE=$ST/profile; [ "$M" = fox ] && PROFILE=$ST/fox-profile; fi
     if [ "$lvl" = strict ]; then sd=$(site "$1" | cut -d' ' -f1); session_gate "$sd"; start || exit 1
