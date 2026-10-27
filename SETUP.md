@@ -88,7 +88,7 @@ sudo bash tunnel/server/enable-routes.sh
 ## 5. Плагин (терминал, владелец или Claude Code)
 
 ```bash
-iva plugin add <owner>/iva-runet/plugin        # owner/repo/подпапка из ссылки
+iva plugin add Entset/iva-runet/plugin
 iva plugin list | grep runet
 ```
 
