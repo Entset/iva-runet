@@ -131,6 +131,15 @@ $R back
 - **kuper.ru, megamarket.ru** (`fox`) — капча «я не робот» даже в Camoufox; сразу сообщить владельцу, сайт не перебирать.
 - **zakupki.gov.ru** и часть госсайтов — сертификат Минцифры; без доверия к нему TLS-ошибка. Доверие ставит владелец: `scripts/trust-ru-ca.sh`. Плановые работы ЕИС бывают по вечерам (заглушка «регламентные работы»).
 
+## Продукты (проверено 2026-10-27, домашний IP)
+
+- **ВкусВилл** — только MCP `vkusvill` (connection_search → `vkusvill_products_search`, `vkusvill_cart_link_create`), не браузер.
+- **HTTP (`$R fetch`, быстро):** Яндекс Лавка `lavka.yandex.ru/search?text=<q>`, Глобус `globus.ru/search?q=<q>`, Метро `online.metro-cc.ru/search?q=<q>`.
+- **Chrome (`$R open`):** Магнит `magnit.ru/search?term=<q>`, Дикси `dixy.ru/catalog/?q=<q>`, Fix Price `fix-price.com/search?q=<q>`.
+- **Camoufox, часто проверка (ссылка владельцу):** Перекрёсток, Пятёрочка, Самокат, Окей, Чижик, Купер (ServicePipe); Лента, Ашан, Утконос (Qrator режет Chrome 403).
+  Заходить только по задаче владельца и по одному сайту за раз; на «Forbidden» без капчи — сегодня больше не трогать.
+- Сравнение цен: начинай с MCP/HTTP-магазинов, браузерные — только если владелец назвал их или нужного товара нет.
+
 ## Служебное
 
 `$R status` (в т.ч. текущая сессия и перерывы) · `$R logs` · `$R stop` · `$R restart` · `$R warm <домен>` (прогреть заново) ·

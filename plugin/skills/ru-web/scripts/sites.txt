@@ -14,3 +14,12 @@ perekrestok.ru fox  # то же
 ozon.ru fox  # Chrome — «нет соединения»; Camoufox — открывается, поиск работает
 kuper.ru fox  # ServicePipe с капчей «я не робот» даже в Camoufox
 megamarket.ru fox  # капча-слайдер даже в Camoufox
+okeydostavka.ru fox  # ServicePipe
+chizhik.club fox  # ServicePipe
+5ka.ru fox  # ServicePipe; Chrome — блок
+lenta.com fox  # Qrator: Chrome 403
+auchan.ru fox  # Qrator: Chrome 403
+utkonos.ru fox  # Qrator: Chrome 403
+magnit.ru  # поиск рисуется скриптом
+dixy.ru  # поиск рисуется скриптом
+fix-price.com  # поиск рисуется скриптом
