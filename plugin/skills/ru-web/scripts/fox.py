@@ -35,6 +35,18 @@ SNAP_JS = r"""(all) => {
 }"""
 
 
+SESS = os.path.join(ST, "fox-session-cookies.json")
+
+
+def save_session(ctx):
+    """Session cookies only (expires -1): the persistent ones are in the profile already. 0600: logins live here too."""
+    c = [k for k in ctx.cookies() if k.get("expires", -1) == -1]
+    fd = os.open(SESS + ".t", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(c, f)
+    os.replace(SESS + ".t", SESS)
+
+
 def sel(s):
     return f'[data-fox-ref="{s[1:]}"]' if s.startswith("@e") else s
 
@@ -73,6 +85,12 @@ def serve(profile, sock_path):
                    i_know_what_im_doing=True).__enter__()
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     ctx.on("page", lambda p: p.close() if p != page else None)   # one tab only, like ruweb's close_extra_tabs
+    # Firefox drops session cookies on every start, and anti-bot clearances (ServicePipe spid/spsc/spjs) are session
+    # cookies: without this the owner's passed captcha is gone after the next idle stop. ruweb's purge_site edits this file too.
+    try:
+        ctx.add_cookies(json.load(open(SESS)))
+    except (OSError, ValueError):
+        pass
     mouse = [700, 400]
     if os.path.exists(sock_path):
         os.unlink(sock_path)
@@ -84,6 +102,7 @@ def serve(profile, sock_path):
             req = json.loads(c.makefile().readline())
             try:
                 out, code = run(page, mouse, req["argv"], req.get("stdin", "")), 0
+                save_session(ctx)
             except SystemExit:
                 c.sendall(json.dumps({"out": "OK closed", "code": 0}).encode())
                 break

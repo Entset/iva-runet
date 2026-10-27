@@ -163,7 +163,6 @@ captcha() {
   vnc_off
   # one-time secrets for this check: VNC password (x11vnc reads 8 chars) and the link's path token
   pw=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 8); tok=$(tr -dc 'a-z0-9' </dev/urandom | head -c 24)
-  (umask 077; x11vnc -storepasswd "$pw" "$ST/vnc.sess" >/dev/null 2>&1)
   # A full-height strip of the screen, not all of it: a phone held upright shows it 2–3x larger.
   # Captcha widget on the page (largest *captcha* element ≤ half the width; ServicePipe puts it at the left) → a third of the
   # screen around it; none (login form etc.) → the middle half. Page x = screen x: the window sits at x=0 without a side border.
@@ -185,6 +184,7 @@ captcha() {
       clip="${w}x$H+$x+0"
     else clip="$(( W / 2 ))x$H+$(( W / 4 ))+0"; fi
   fi
+  (umask 077; x11vnc -storepasswd "$pw" "$ST/vnc.sess" >/dev/null 2>&1)
   x11vnc -display "$disp" ${auth:+-auth "$auth"} ${clip:+-clip "$clip"} -localhost -rfbport "$VNC_PORT" -rfbauth "$ST/vnc.sess" -forever -shared -noxdamage \
     -bg -o "$ST/logs/vnc.log" >/dev/null 2>&1 9>&- || { echo "x11vnc не запустился, см. $ST/logs/vnc.log"; exit 1; }
   pgrep -n -f "x11vnc -display $disp " > "$ST/vnc.pid"; echo "$d" > "$ST/captcha"; touch "$ST/last"
@@ -203,7 +203,7 @@ $link
 }
 captcha_done() {
   local d; d=$(cat "$ST/captcha" 2>/dev/null); vnc_off
-  [ -n "$d" ] || { echo "проверка не была открыта"; exit 1; }
+  [ -n "$d" ] || { echo "NO_CAPTCHA: окна нет — закрыто или истекло (30 мин). Если сайт всё ещё просит проверку — ruweb captcha <url> и новую ссылку владельцу."; exit 1; }
   # the owner passed it by hand: earlier blocks of this site no longer count
   awk -v d="$d" '$1!=d' "$ST/blocks" > "$ST/blocks.t" && mv "$ST/blocks.t" "$ST/blocks"
   log "captcha done $d"; jlog_begin captcha "$d" owner; check_block "$d"; jlog_end
@@ -408,6 +408,13 @@ import sqlite3, sys
 db, d = sys.argv[1:]
 c = sqlite3.connect(db)
 c.execute("delete from moz_cookies where host in (?, ?) or host like ?", (d, '.' + d, '%.' + d)); c.commit()
+PY
+    python3 - "$ST/fox-session-cookies.json" "$1" <<'PY'
+import json, sys
+f, d = sys.argv[1:]
+try: c = json.load(open(f))
+except (OSError, ValueError): sys.exit()
+json.dump([k for k in c if k["domain"].lstrip(".") != d and not k["domain"].endswith("." + d)], open(f, "w"))
 PY
     rm -rf "$PROFILE"/storage/default/*"$1"* "$PROFILE"/cache2 "$ST/warm.$1"; return
   fi
