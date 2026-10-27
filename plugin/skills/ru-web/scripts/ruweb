@@ -103,10 +103,41 @@ start() {
 
 stop() { vnc_off; ab close >/dev/null 2>&1; pkill -f -- "$(PAT)" 2>/dev/null; sleep 1; rm -f "$ST/fox.sock"; log "stop $MODE $*"; }
 
-# --- Owner passes a check (captcha, login) by hand: the browser's own screen over VNC, localhost only (owner: ssh -L).
-# The site's clearance cookie then stays in the persistent profile. Iva never solves captchas itself.
-VNC_PORT=${RUWEB_VNC_PORT:-5900} CAPTCHA_MAX=7200
-vnc_off() { [ -f "$ST/vnc.pid" ] && kill "$(cat "$ST/vnc.pid")" 2>/dev/null; rm -f "$ST/vnc.pid" "$ST/captcha"; }
+# --- Owner passes a check (captcha, login) by hand in the browser's own screen.
+# Phone way: one-time HTTPS link (noVNC in any browser, opened from Telegram) — a route added to the running Caddy
+# through its local admin API (no sudo), random token in the path, random VNC password in the #fragment (never reaches a server log).
+# Without Caddy: VNC on localhost, owner comes via ssh -L. The site's clearance cookie then stays in the persistent profile.
+# Iva never solves captchas itself.
+VNC_PORT=${RUWEB_VNC_PORT:-5900} WS_PORT=${RUWEB_WS_PORT:-6080} CAPTCHA_MAX=1800 CADDY=${RUWEB_CADDY:-http://localhost:2019}
+vnc_off() {
+  [ -f "$ST/vnc.pid" ] && kill "$(cat "$ST/vnc.pid")" 2>/dev/null
+  pkill -f -- "websockify --web $ST/novnc" 2>/dev/null   # setsid forks: its pid is not websockify's
+  curl -s -m 3 -X DELETE "$CADDY/id/ruweb-vnc" >/dev/null 2>&1
+  rm -f "$ST/vnc.pid" "$ST/vnc.sess" "$ST/captcha"
+}
+# Public HTTPS link to the noVNC page, or nothing (then the ssh way). Host: RUWEB_PUBLIC_HOST or the first host Caddy serves.
+web_link() {
+  local tok=$1 pw=$2 cfg srv h
+  [ -f "$ST/novnc/vnc.html" ] && [ -x "$ST/http/venv/bin/websockify" ] || return 1
+  cfg=$(curl -s -m 3 "$CADDY/config/apps/http/servers") && [ -n "$cfg" ] && [ "$cfg" != null ] || return 1
+  h=${RUWEB_PUBLIC_HOST:-$(jq -r '[.[].routes[]?.match[]?.host[]?] | map(select(. != "localhost")) | first // empty' <<<"$cfg")}
+  srv=$(jq -r --arg h "$h" 'to_entries | map(select(any(.value.routes[]?.match[]?.host[]?; . == $h))) | first.key // (keys | first)' <<<"$cfg")
+  [ -n "$h" ] && [ -n "$srv" ] || return 1
+  setsid nohup "$ST/http/venv/bin/websockify" --web "$ST/novnc" "127.0.0.1:$WS_PORT" "localhost:$VNC_PORT" \
+    >>"$ST/logs/vnc.log" 2>&1 9>&- </dev/null &
+  local i; for i in 1 2 3 4 5 6 7 8 9 10; do ss -ltn | grep -q "127.0.0.1:$WS_PORT " && break; sleep 0.3; done
+  # PUT on an array index inserts there: our route goes before the site's catch-all 404.
+  # The owner gets the short /vnc-<tok>; Caddy redirects it to the noVNC page with the password in the #fragment.
+  # A full link with "password=" in a chat message gets cut to [REDACTED] by secret filters (2026-10-27).
+  jq -nc --arg h "$h" --arg p "/vnc-$tok" --arg up "127.0.0.1:$WS_PORT" \
+     --arg full "/vnc-$tok/vnc.html#autoconnect=1&resize=scale&show_dot=1&reconnect=1&path=vnc-$tok/websockify&password=$pw" \
+     '{"@id": "ruweb-vnc", terminal: true, match: [{host: [$h], path: [$p, $p + "/", $p + "/*"]}],
+      handle: [{handler: "subroute", routes: [
+        {match: [{path: [$p, $p + "/"]}], handle: [{handler: "static_response", status_code: 302, headers: {Location: [$full]}}]},
+        {handle: [{handler: "rewrite", strip_path_prefix: $p}, {handler: "reverse_proxy", upstreams: [{dial: $up}]}]}]}]}' \
+    | curl -sf -m 5 -X PUT -H 'Content-Type: application/json' -d @- "$CADDY/config/apps/http/servers/$srv/routes/0" >/dev/null || return 1
+  echo "https://$h/vnc-$tok"
+}
 # "<display> [xauth file]" of the browser's screen: fox.py's own Xvfb, or the Xvfb agent-browser starts for headed Chrome
 # (display chosen via -displayfd, so read from its socket). ponytail: newest agent-browser Xvfb — wrong if another headed session started later.
 browser_display() {
@@ -120,8 +151,7 @@ captcha_wait() {   # navigation is paused while the owner is in the window
   echo "CAPTCHA_WAIT: владелец проходит проверку в окне браузера ($(cat "$ST/captcha")). Браузер не трогать; после «готово» от владельца — \`ruweb captcha done\`."; exit 9
 }
 captcha() {
-  [ -f "$ST/vnc.pass" ] || { echo "NO_VNC_PASS: владелец один раз задаёт пароль в своём терминале: x11vnc -storepasswd $ST/vnc.pass"; exit 9; }
-  local u=${1:-} d disp auth
+  local u=${1:-} d disp auth tok pw link
   if [ -n "$u" ]; then   # owner-driven: no cooldown, no pace, no detector — a person is about to look at it
     d=$(host "$u"); M=local; [ "$(level "$u")" = fox ] && { fox_ok "$d"; M=fox; }
     if [ "$M" != "$MODE" ]; then stop "switch to $M"; echo "$M" > "$ST/mode"; MODE=$M
@@ -131,14 +161,38 @@ captcha() {
   read -r disp auth <<<"$(browser_display)"
   [ -n "$disp" ] || { echo "у браузера нет экрана (headless): нужен Xvfb (sudo apt install -y xvfb), затем ruweb restart"; exit 1; }
   vnc_off
-  x11vnc -display "$disp" ${auth:+-auth "$auth"} -localhost -rfbport "$VNC_PORT" -rfbauth "$ST/vnc.pass" -forever -shared -noxdamage \
+  # one-time secrets for this check: VNC password (x11vnc reads 8 chars) and the link's path token
+  pw=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 8); tok=$(tr -dc 'a-z0-9' </dev/urandom | head -c 24)
+  (umask 077; x11vnc -storepasswd "$pw" "$ST/vnc.sess" >/dev/null 2>&1)
+  # A full-height strip of the screen, not all of it: a phone held upright shows it 2–3x larger.
+  # Captcha widget on the page (largest *captcha* element ≤ half the width; ServicePipe puts it at the left) → a third of the
+  # screen around it; none (login form etc.) → the middle half. Page x = screen x: the window sits at x=0 without a side border.
+  local W H cx cw clip=; read -r W H < <(XAUTHORITY=${auth:-} xdpyinfo -display "$disp" 2>/dev/null | awk '/dimensions:/ {split($2, a, "x"); print a[1], a[2]}')
+  local try; for try in 1 2 3 4 5 6; do   # ServicePipe draws its captcha a few seconds after the page loads
+  read -r cx cw < <(ab eval "(() => { let b = null; for (const e of document.querySelectorAll('[class*=captcha i],[id*=captcha i],iframe[src*=captcha i]')) {
+      const r = e.getBoundingClientRect(); if (r.width > 60 && r.height > 60 && r.width <= innerWidth / 2 && (!b || r.width * r.height > b.width * b.height)) b = r; }
+      return b ? Math.round(b.x + b.width / 2) + ' ' + Math.round(b.width) : '' })()" 2>/dev/null | tr -d '"')
+  [ -n "${cx:-}" ] && break; sleep 1.5; done
+  if [ -n "${W:-}" ]; then
+    if [ -n "${cx:-}" ]; then local w=$(( W / 3 > cw + 80 ? W / 3 : cw + 80 )) x; x=$(( cx - w / 2 )); (( x < 0 )) && x=0; (( x > W - w )) && x=$(( W - w ))
+      clip="${w}x$H+$x+0"
+    else clip="$(( W / 2 ))x$H+$(( W / 4 ))+0"; fi
+  fi
+  x11vnc -display "$disp" ${auth:+-auth "$auth"} ${clip:+-clip "$clip"} -localhost -rfbport "$VNC_PORT" -rfbauth "$ST/vnc.sess" -forever -shared -noxdamage \
     -bg -o "$ST/logs/vnc.log" >/dev/null 2>&1 9>&- || { echo "x11vnc не запустился, см. $ST/logs/vnc.log"; exit 1; }
-  pgrep -n -f "x11vnc -display $disp " > "$ST/vnc.pid"; echo "$d" > "$ST/captcha"; touch "$ST/last"; log "captcha $d (vnc $disp)"
-  echo "CAPTCHA_OWNER $d: окно браузера открыто для владельца на 2 ч. Передай владельцу:
-  1) на своём компьютере/телефоне: ssh -N -L $VNC_PORT:localhost:$VNC_PORT $(whoami)@$(curl -4 -s -m 5 https://ifconfig.me/ip || echo '<IP сервера>')
-  2) VNC-клиент → localhost:$VNC_PORT, пароль VNC — его собственный;
+  pgrep -n -f "x11vnc -display $disp " > "$ST/vnc.pid"; echo "$d" > "$ST/captcha"; touch "$ST/last"
+  if link=$(web_link "$tok" "$pw"); then log "captcha $d (vnc $disp, web)"
+    echo "CAPTCHA_OWNER $d: окно браузера открыто для владельца на $(( CAPTCHA_MAX / 60 )) мин. Отправь владельцу эту ссылку целиком, отдельным сообщением, без изменений:
+$link
+Скажи ему: открыть ссылку (откроется в браузере телефона), пройти проверку пальцем прямо в окне, вернуться и написать «готово». Если мелко — повернуть телефон горизонтально.
+Потом: ruweb captcha done. До этого браузер не трогать."
+  else log "captcha $d (vnc $disp, ssh)"
+    echo "CAPTCHA_OWNER $d: окно браузера открыто для владельца на $(( CAPTCHA_MAX / 60 )) мин (ссылкой не вышло — нет Caddy/noVNC, ruweb setup). Передай владельцу:
+  1) на своём компьютере: ssh -N -L $VNC_PORT:localhost:$VNC_PORT $(whoami)@$(curl -4 -s -m 5 https://ifconfig.me/ip || echo '<IP сервера>')
+  2) VNC-клиент → localhost:$VNC_PORT, пароль: $pw
   3) пройти проверку (можно войти в аккаунт), написать «готово».
 Потом: ruweb captcha done. До этого браузер не трогать."
+  fi
 }
 captcha_done() {
   local d; d=$(cat "$ST/captcha" 2>/dev/null); vnc_off
@@ -153,7 +207,9 @@ watch() {
     # `open` may have switched engines since this watcher started: watch whichever one runs now
     MODE=$(cat "$ST/mode" 2>/dev/null || echo local); PROFILE=$ST/profile; [ "$MODE" = fox ] && PROFILE=$ST/fox-profile
     running || exit 0
-    [ -f "$ST/captcha" ] && touch "$ST/last"   # the owner is in the window: not idle
+    if [ -f "$ST/captcha" ]; then   # the owner is in the window: not idle; the link dies after CAPTCHA_MAX
+      if [ $(( $(date +%s) - $(stat -c %Y "$ST/captcha") )) -gt $CAPTCHA_MAX ]; then vnc_off; log "captcha expired"; else touch "$ST/last"; fi
+    fi
     [ $(( $(date +%s) - $(stat -c %Y "$ST/last") )) -gt $IDLE_MAX ] && { stop idle; exit 0; }
     max=$RSS_MAX_MB; [ "$MODE" = fox ] && max=$RSS_MAX_FOX_MB
     [ "$(rss_mb)" -gt $max ] && { stop "rss $(rss_mb)MB"; exit 0; }
@@ -165,7 +221,7 @@ cooldown() {
   local d=$1 now; now=$(date +%s)
   local until; until=$(awk -v d="$d" '$1==d {u=$2} END{print u+0}' "$ST/blocks")
   if [ "$until" -gt "$now" ]; then
-    echo "COOLDOWN $d: пауза после блокировки до $(date -d @"$until" +%H:%M). Не открывать сайт до этого времени."; exit 3
+    echo "COOLDOWN $d: пауза после блокировки до $(date -d @"$until" +%H:%M). Не открывать сайт до этого времени. Владелец просит этот сайт сейчас — ruweb captcha <url> (пауза на окно для владельца не действует) и отправь ему ссылку из ответа."; exit 3
   fi
 }
 
@@ -376,9 +432,9 @@ blocked() {
       && mv "$ST/sites.t" "$ST/sites.txt"; log "auto fox $d"; nxt=" Дальше сайт пойдёт через Camoufox."
   fi
   if [ "$n" -ge 1 ]; then
-    echo "STOP $d: повторная блокировка за сутки ($why). Прекрати работу с сайтом и сообщи владельцу. Капчу не решать; если владелец готов пройти проверку сам — ruweb captcha <url>."; exit 4
+    echo "STOP $d: повторная блокировка за сутки ($why). Прекрати работу с сайтом и сообщи владельцу. Капчу не решать. Владелец просил этот сайт — сразу ruweb captcha <url> и отправь ему ссылку из ответа; другим сайтом не подменять."; exit 4
   fi
-  echo "BLOCKED $d: $why. Остановлено, данные сайта стёрты (остальной профиль цел), пауза до $(date -d @"$until" +%H:%M), затем один повтор с прогревом.$nxt Капчу не решать — сообщи владельцу; если он готов пройти проверку сам — ruweb captcha <url>."; exit 3
+  echo "BLOCKED $d: $why. Остановлено, данные сайта стёрты (остальной профиль цел), пауза до $(date -d @"$until" +%H:%M), затем один повтор с прогревом.$nxt Капчу не решать. Владелец просил этот сайт — сразу ruweb captcha <url> и отправь ему ссылку из ответа; другим сайтом не подменять."; exit 3
 }
 
 # --- Action log: one JSON line per action for report.sh. pause = idle time before the action, dur = its length.
@@ -502,6 +558,10 @@ setup() {
   [ -x "$HTTP_PY" ] && "$HTTP_PY" -c 'import curl_cffi' 2>/dev/null || { PATH=$HOME/.local/bin:$PATH
     { command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
       uv venv -q --allow-existing "$ST/http/venv" && uv pip install -q -p "$HTTP_PY" curl_cffi; } >>"$ST/logs/setup.log" 2>&1; }
+  # captcha window by link (phone): websockify in the same venv + noVNC static files (~3 MB)
+  [ -x "$ST/http/venv/bin/websockify" ] || { PATH=$HOME/.local/bin:$PATH; uv pip install -q -p "$HTTP_PY" websockify >>"$ST/logs/setup.log" 2>&1; }
+  [ -f "$ST/novnc/vnc.html" ] || { mkdir -p "$ST/novnc" && curl -sfL https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz \
+    | tar xz -C "$ST/novnc" --strip-components=1; } >>"$ST/logs/setup.log" 2>&1
   cat > "$ST/config" <<EOF
 # \`ruweb setup\` $(date '+%F %T'): ${avail} MB RAM free, ${disk} MB disk free. Rerun after a server change.
 RSS_MAX_MB=$(( budget > 1800 ? 1800 : budget ))
@@ -520,7 +580,8 @@ EOF
   echo "$net"
   "$HTTP_PY" -c 'import curl_cffi' 2>/dev/null && echo "быстрый уровень (HTTP): да" || echo "WARN: быстрый уровень (curl_cffi) не встал, см. $ST/logs/setup.log — fetch пойдёт браузером"
   [ -n "$sudo_cmd" ] && echo "владельцу (одна команда, затем ruweb setup ещё раз): $sudo_cmd"
-  [ -f "$ST/vnc.pass" ] || echo "окно для капчи: владелец один раз задаёт пароль VNC в своём терминале: x11vnc -storepasswd $ST/vnc.pass"
+  curl -s -m 3 "$CADDY/config/apps/http/servers" | grep -q host && [ -f "$ST/novnc/vnc.html" ] \
+    && echo "окно для капчи: ссылкой (Caddy + noVNC)" || echo "окно для капчи: только через ssh -L (нет Caddy с HTTPS-доменом или noVNC)"
   return 0
 }
 

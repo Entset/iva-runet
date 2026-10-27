@@ -118,9 +118,10 @@ Camoufox проверить: `$R open https://www.ozon.ru/` → `OK Ozon …`, `
 
 ## 6. Дополнительно
 
-- **Окно для владельца** (капча, вход в аккаунт) — `x11vnc` (ставит `setup`), пароль владелец задаёт сам
-  в своём терминале: `x11vnc -storepasswd ~/.iva-browser/vnc.pass` (не печатать и не просить в чат).
-  Готово, если: `$R captcha https://ya.ru/` → `CAPTCHA_OWNER`, владелец видит окно, `$R captcha done` → `OK`.
+- **Окно для владельца** (капча, вход в аккаунт) — `x11vnc` + noVNC/websockify (ставит `setup`). Ссылкой — если на сервере
+  работает Caddy с HTTPS-доменом и локальным admin API (`localhost:2019`, по умолчанию включён); домен берётся из конфига Caddy
+  или из `RUWEB_PUBLIC_HOST` в `~/.iva-browser/config`. Без Caddy — через `ssh -L` (пароль одноразовый, в ответе).
+  Готово, если: `$R captcha https://ya.ru/` → `CAPTCHA_OWNER` со ссылкой, ссылка открывает окно, `$R captcha done` → `OK`.
 - **Госсайты** (вопрос 2): `data/custom/plugins/runet/skills/ru-web/scripts/trust-ru-ca.sh` — доверие к сертификату
   Минцифры для браузера; скрипт печатает, что ещё сделать для Node (web_fetch) и системы. Это корневой сертификат для всех сайтов —
   только с явного «да» владельца.
