@@ -183,4 +183,9 @@ SETUP.md                    — пошаговая установка для а�
 - Плагин: `iva plugin remove runet`, строка в `~/iva/data/custom/agent/instructions/rules.md`, `rm -rf ~/.iva-browser`.
 - Туннель: `sudo bash tunnel/server/rollback.sh` и блок «Откат» в инструкции для дома.
 
+## Авторы
+
+- [Entset](https://github.com/Entset) — идея, требования, проверка на живой Иве
+- Claude (Anthropic) — код и документация в паре с автором
+
 MIT
