@@ -97,7 +97,7 @@ iva plugin list | grep runet
 Правило в `~/iva/data/custom/agent/instructions/rules.md` (дописать одной строкой, если такой ещё нет):
 
 ```
-- Чувствительные российские сайты — только через навык ru-web (проверка `ruweb sensitive` перед открытием); блок или капча — стоп и сообщить.
+- Российский поиск и сайты — навык ru-web: поиск про РФ — `ruweb search` вместе с web_search; российские страницы — `ruweb fetch` (сам выбирает HTTP или браузер); чувствительные сайты — только через ruweb; блок или капча — стоп и сообщить.
 ```
 
 Проверка (из `~/iva`):
@@ -107,6 +107,8 @@ R=data/custom/plugins/runet/skills/ru-web/scripts/ruweb
 $R setup                                # подстроиться под сервер (сам запускается при первом вызове); «нет» на вопрос 3 → $R setup --no-fox
 $R sensitive https://www.avito.ru/      # yes strict
 $R open https://ya.ru/                  # OK Яндекс | https://ya.ru/
+$R search "купить щебень спб"          # OK 10 результатов (duckduckgo, регион RU)
+$R fetch --max 300 https://www.drom.ru/ # OK Дром … (HTTP, без браузера)
 $R status; $R stop
 ```
 

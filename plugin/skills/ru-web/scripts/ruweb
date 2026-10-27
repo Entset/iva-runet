@@ -40,6 +40,9 @@ ab() {
   agent-browser --session ruweb --profile "$PROFILE" --executable-path "$HERE/chrome" $HEADED \
     --init-script "$HERE/stealth.js" --user-agent "$UA" --args "--no-sandbox" "$@" 9>&-
 }
+# fast tier: plain HTTP with Chrome's TLS fingerprint (web.py, curl_cffi), no browser, no lock
+HTTP_PY=$ST/http/venv/bin/python
+web() { "$HTTP_PY" -I "$HERE/web.py" "$@" 9>&-; }
 host() { local h=${1#*://}; h=${h%%/*}; h=${h%%:*}; echo "${h#www.}"; }
 rnd() { echo $(( $1 + RANDOM % ($2 - $1 + 1) )); }
 pause() { sleep "$(( $1 + RANDOM % ($2 - $1 + 1) )).$(( RANDOM % 10 ))"; }  # random $1..$2+0.9 s
@@ -366,10 +369,16 @@ blocked() {
   [ "$lvl" = strict ] && session_close
   stop "block $d"
   purge_site "$d"
+  # Chrome blocked on a plain/warm site: the next try goes through Camoufox (strict sites stay as tuned)
+  local nxt=
+  if [ "$MODE" = local ] && [ "$FOX" = 1 ] && site "$d" >/dev/null && { [ "$lvl" = normal ] || [ "$lvl" = warm ]; }; then
+    awk -v d="$d" '!/^[[:space:]]*#/ && $1==d { if ($2 ~ /^(warm|normal)$/) $2 = "fox"; else $1 = $1 " fox" } 1' "$ST/sites.txt" > "$ST/sites.t" \
+      && mv "$ST/sites.t" "$ST/sites.txt"; log "auto fox $d"; nxt=" Дальше сайт пойдёт через Camoufox."
+  fi
   if [ "$n" -ge 1 ]; then
     echo "STOP $d: повторная блокировка за сутки ($why). Прекрати работу с сайтом и сообщи владельцу. Капчу не решать; если владелец готов пройти проверку сам — ruweb captcha <url>."; exit 4
   fi
-  echo "BLOCKED $d: $why. Остановлено, данные сайта стёрты (остальной профиль цел), пауза до $(date -d @"$until" +%H:%M), затем один повтор с прогревом. Капчу не решать — сообщи владельцу; если он готов пройти проверку сам — ruweb captcha <url>."; exit 3
+  echo "BLOCKED $d: $why. Остановлено, данные сайта стёрты (остальной профиль цел), пауза до $(date -d @"$until" +%H:%M), затем один повтор с прогревом.$nxt Капчу не решать — сообщи владельцу; если он готов пройти проверку сам — ruweb captcha <url>."; exit 3
 }
 
 # --- Action log: one JSON line per action for report.sh. pause = idle time before the action, dur = its length.
@@ -489,6 +498,10 @@ setup() {
       uv pip install -p "$ST/camoufox/venv/bin/python" "camoufox[geoip]" && "$ST/camoufox/venv/bin/python" -m camoufox fetch
     } >>"$ST/logs/setup.log" 2>&1 && fox=1 || why="установка не удалась, см. $ST/logs/setup.log"
   fi
+  # fast tier (~40 MB, no sudo): curl_cffi in its own venv
+  [ -x "$HTTP_PY" ] && "$HTTP_PY" -c 'import curl_cffi' 2>/dev/null || { PATH=$HOME/.local/bin:$PATH
+    { command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+      uv venv -q --allow-existing "$ST/http/venv" && uv pip install -q -p "$HTTP_PY" curl_cffi; } >>"$ST/logs/setup.log" 2>&1; }
   cat > "$ST/config" <<EOF
 # \`ruweb setup\` $(date '+%F %T'): ${avail} MB RAM free, ${disk} MB disk free. Rerun after a server change.
 RSS_MAX_MB=$(( budget > 1800 ? 1800 : budget ))
@@ -505,6 +518,7 @@ EOF
   log "setup: chrome ${RSS_MAX_MB}MB, fox=$FOX ${FOX_WHY}; $net"
   echo "OK setup: Chrome до ${RSS_MAX_MB} МБ; Camoufox: $([ "$FOX" = 1 ] && echo "да, до ${RSS_MAX_FOX_MB} МБ" || echo "нет — $FOX_WHY")"
   echo "$net"
+  "$HTTP_PY" -c 'import curl_cffi' 2>/dev/null && echo "быстрый уровень (HTTP): да" || echo "WARN: быстрый уровень (curl_cffi) не встал, см. $ST/logs/setup.log — fetch пойдёт браузером"
   [ -n "$sudo_cmd" ] && echo "владельцу (одна команда, затем ruweb setup ещё раз): $sudo_cmd"
   [ -f "$ST/vnc.pass" ] || echo "окно для капчи: владелец один раз задаёт пароль VNC в своём терминале: x11vnc -storepasswd $ST/vnc.pass"
   return 0
@@ -512,12 +526,12 @@ EOF
 
 cmd=${1:-status}; shift || true
 case $cmd in
-  status|logs|_watch|_tabclose|sensitive|mark) ;;
+  status|logs|_watch|_tabclose|sensitive|mark|fetch|search) ;;   # fetch locks per browser step itself
   dailywarm) lock 0 ;;      # cron: skip this round if Iva is using the browser
   *) lock ;;
 esac
 # first use on this server: fit to it before anything opens
-[ -f "$ST/config" ] || case $cmd in setup|status|logs|stop|_watch|_tabclose|sensitive|mark|dailywarm) ;;
+[ -f "$ST/config" ] || case $cmd in setup|status|logs|stop|_watch|_tabclose|sensitive|mark|dailywarm|search) ;;
   *) echo "первый запуск: подстраиваю ruweb под этот сервер…" >&2; setup >&2 ;; esac
 case $cmd in
   setup) setup "${1:-}" ;;
@@ -529,7 +543,7 @@ case $cmd in
     if running; then echo "running, rss $(rss_mb)MB, idle $(( $(date +%s) - $(stat -c %Y "$ST/last") ))s"; else echo "stopped"; fi
     echo "profile $(du -sm "$PROFILE" 2>/dev/null | cut -f1)MB; blocks today: $(awk -v t=$(( $(date +%s) - 86400 )) '$3>t {print $1}' "$ST/blocks" | sort | uniq -c | tr '\n' ' ')"
     [ -f "$ST/session" ] && echo "session: $(awk '{printf "%s %d/%d actions, %d min left", $1, $5, $4, ($3-systime())/60}' "$ST/session")"
-    for f in "$ST"/break.*; do [ -f "$f" ] && [ "$(cat "$f")" -gt "$(date +%s)" ] && echo "break ${f##*/break.} until $(date -d @"$(cat "$f")" +%H:%M)"; done ;;
+    for f in "$ST"/break.*; do [ -f "$f" ] && [ "$(cat "$f")" -gt "$(date +%s)" ] && echo "break ${f##*/break.} until $(date -d @"$(cat "$f")" +%H:%M)"; done; true ;;
   logs) tail -n "${1:-30}" "$ST/logs/ruweb.log" ;;
   _watch) watch ;;
   _tabclose) ab tab close "$1" ;;
@@ -541,6 +555,25 @@ case $cmd in
     log "mark $d"; echo "OK $d в списке чувствительных" ;;
   warm) start || exit 1; d=$(host "$1"); cooldown "$d"; rm -f "$ST/warm.$d"; warm "$d" && echo "OK warmed $d" ;;
   endsession) session_close; echo "OK session closed" ;;
+  search)   # RU web search (DuckDuckGo ru-ru, Bing ru-RU) — parallel-safe, no browser
+    [ -x "$HTTP_PY" ] || { echo "NO_RESULTS: нет быстрого уровня — ruweb setup; пока используй web_search"; exit 1; }
+    web search "$@" ;;
+  fetch)    # fetch [--max N] url... — auto tier: listed sites → browser; the rest → HTTP, and the browser only where HTTP failed
+    max=20000; [ "${1:-}" = --max ] && { max=$2; shift 2; }
+    http=() br=() rc=0
+    for u; do if site "$u" >/dev/null || [ ! -x "$HTTP_PY" ]; then br+=("$u"); else http+=("$u"); fi; done
+    if [ ${#http[@]} -gt 0 ]; then
+      out=$(web get --max "$max" "${http[@]}")
+      grep -v '^NEED_BROWSER ' <<<"$out" | cat -s
+      while read -r _ u why; do u=${u%:}
+        "$0" mark "$u" "авто: http — $why" >/dev/null; log "fetch → browser $(host "$u") ($why)"; br+=("$u")
+      done < <(grep '^NEED_BROWSER ' <<<"$out")
+    fi
+    for u in "${br[@]}"; do   # one by one: the browser has one owner
+      o=$("$0" open "$u"); c=$?; echo "$o"
+      if [ $c = 0 ]; then "$0" get text body | head -c "$max"; echo; else rc=$c; fi
+    done
+    exit $rc ;;
   captcha) if [ "${1:-}" = done ]; then captcha_done; else captcha "${1:-}"; fi ;;
   open)
     captcha_wait; d=$(host "$1"); lvl=$(level "$1"); cooldown "$d"
