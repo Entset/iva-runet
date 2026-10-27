@@ -173,6 +173,13 @@ captcha() {
       const r = e.getBoundingClientRect(); if (r.width > 60 && r.height > 60 && r.width <= innerWidth / 2 && (!b || r.width * r.height > b.width * b.height)) b = r; }
       return b ? Math.round(b.x + b.width / 2) + ' ' + Math.round(b.width) : '' })()" 2>/dev/null | tr -d '"')
   [ -n "${cx:-}" ] && break; sleep 1.5; done
+  # No widget and a bare "Forbidden" (ServicePipe hard ban of the IP): nothing for the owner to pass
+  if [ -z "${cx:-}" ] && ab get text body 2>/dev/null | head -c 400 | grep -q '^Forbidden'; then
+    log "captcha $d: hard Forbidden, no check to pass"
+    echo "HARD_BLOCK $d: сайт отдаёт «Forbidden» без капчи — это запрет домашнего IP, проходить нечего. Ссылку не отправлять.
+Сообщи владельцу: $d сейчас не пускает; повторять сегодня нельзя (каждый заход продлевает запрет), попробуем завтра. Сайт ничем не подменять без его слова."
+    exit 4
+  fi
   if [ -n "${W:-}" ]; then
     if [ -n "${cx:-}" ]; then local w=$(( W / 3 > cw + 80 ? W / 3 : cw + 80 )) x; x=$(( cx - w / 2 )); (( x < 0 )) && x=0; (( x > W - w )) && x=$(( W - w ))
       clip="${w}x$H+$x+0"
