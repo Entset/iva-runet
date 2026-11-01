@@ -25,8 +25,32 @@ WireGuard быстрее и надёжнее; SSH проще (одна кома�
 | `server/install-ssh-socks.sh` | SSH-вариант |
 | `server/add-device.sh "<ssh-ключ>"` | подключить устройство (SSH-транспорт) |
 | `server/enable-routes.sh` | включить маршруты и проверить |
+| `server/repair-routes-timer.sh` | восстановить автозапуск маршрутов после перезагрузки |
 | `server/check.sh` | диагностика |
 | `server/rollback.sh` | откат |
+
+## Маршруты после перезагрузки
+
+Выбранный транспорт и `iva-ru-routes.timer` должны быть включены в автозапуск. Таймер проверяет домашний выход через минуту после загрузки VPS, через 10 секунд после своей активации и затем каждые 5 минут. Как только дом доступен, российские IPv4-маршруты возвращаются в таблицу `100`: через `wg0` для WireGuard или `ivasocks` для SSH.
+
+Если после перезагрузки маршруты не вернулись, из корня репозитория выполни:
+
+```sh
+sudo bash tunnel/server/repair-routes-timer.sh
+```
+
+Скрипт сохраняет копию своего drop-in, записывает `/etc/systemd/system/iva-ru-routes.timer.d/zz-startup-recovery.conf`, включает и перезапускает таймер, затем сразу запускает существующую проверку маршрутов. Транспорт не перезапускается. Имя drop-in выбрано так, чтобы правило загружалось после старого `override.conf`; пустые значения интервалов в старой настройке могут сбросить триггеры запуска. При недоступном доме скрипт сообщает об этом, а таймер продолжает повторять проверку каждые 5 минут.
+
+Проверка:
+
+```sh
+systemctl is-enabled iva-ru-routes.timer
+systemctl status iva-ru-routes.timer --no-pager
+systemctl show iva-ru-routes.timer -p TimersMonotonic
+ip route get 77.88.8.8
+```
+
+В `TimersMonotonic` должны быть `OnBootUSec`, `OnActiveUSec` и `OnUnitActiveUSec`. При доступном доме маршрут должен содержать `dev wg0` (или `dev ivasocks`) и `table 100`. Автозапуск транспорта: `systemctl is-enabled wg-quick@wg0.service` для WireGuard или `systemctl is-enabled iva-socks-tun.service` для SSH. После перезагрузки дома WireGuard должен подключиться сам, а SSH-устройство — восстановить `ssh -R` через настроенный автозапуск.
 
 ## Если что-то поменялось
 

@@ -21,6 +21,7 @@ Description=Iva: проверка домашнего выхода и RU-марш
 
 [Timer]
 OnBootSec=1min
+OnActiveSec=10s
 OnUnitActiveSec=5min
 Persistent=true
 
