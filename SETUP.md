@@ -44,10 +44,10 @@ ip rule show                             # приоритеты 100–102 дол
 ls /etc/iva/tunnel.env 2>/dev/null       # уже стоит? тогда bash tunnel/server/check.sh и не ставить заново
 command -v iva agent-browser jq python3 flock curl
 free -m; df -h ~                         # Chrome 300–1000 МБ; Camoufox ~1.6 ГБ RAM и ~2.8 ГБ диска (ruweb setup решит сам)
-curl -4 -s https://ifconfig.me/ip; curl -4 -s https://ipv4-internet.yandex.net/api/v0/ip   # IP VPS / IP для российских сайтов
+curl -4 -s https://ifconfig.me/ip; curl -4 -s --max-time 15 -L -A Mozilla/5.0 https://yandex.ru/internet | grep -oE '"[0-9]{1,3}(\.[0-9]{1,3}){3}"' | head -1 | tr -d '"'   # IP VPS / IP для российских сайтов
 ```
 
-Готово, если: Debian/Ubuntu, есть `iva` и `agent-browser`. Если ipv4-internet.yandex.net уже показывает российский IP — туннель не нужен.
+Готово, если: Debian/Ubuntu, есть `iva` и `agent-browser`. Если yandex.ru/internet уже показывает российский IP — туннель не нужен.
 
 Склонировать репозиторий на сервер (ссылку дал владелец):
 
@@ -83,7 +83,7 @@ sudo bash tunnel/server/install-ssh-socks.sh
 sudo bash tunnel/server/enable-routes.sh
 ```
 
-Готово, если: ifconfig.me = IP VPS, ipv4-internet.yandex.net = домашний (или мобильный) IP, ya.ru/gosuslugi отвечают, текущая SSH-сессия жива.
+Готово, если: ifconfig.me = IP VPS, yandex.ru/internet = домашний (или мобильный) IP, ya.ru/gosuslugi отвечают, текущая SSH-сессия жива.
 Проверь также `systemctl is-enabled iva-ru-routes.timer` и автозапуск транспорта (`wg-quick@wg0.service` или `iva-socks-tun.service`). `systemctl show iva-ru-routes.timer -p TimersMonotonic` должен показывать запуск после загрузки (`OnBootUSec`), активации (`OnActiveUSec`) и повтор (`OnUnitActiveUSec`). Если триггеры потеряны в существующей установке — `sudo bash tunnel/server/repair-routes-timer.sh`, затем повторить проверки. Перезагружать VPS для проверки без согласования с владельцем не нужно.
 Если SSH оборвался — владелец заходит заново (входящие должны работать), `sudo systemctl disable --now iva-ru-routes.timer; sudo ip route flush table 100` и разбираться с `WAN` в `/etc/iva/tunnel.env`.
 

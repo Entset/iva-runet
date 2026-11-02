@@ -386,7 +386,7 @@ check_block() {
   # JS challenges (РТС Anti-DDoS) pass by themselves in ~10 s: give them 24 s before calling it a block.
   for i in 1 2 3 4 5 6 7; do
     looks_blocked || break
-    [ "$i" = 7 ] && { BLOCK=hard; jlog_end; blocked "$(host "$url")" "$title"; }
+    [ "$i" = 7 ] && { BLOCK=hard; jlog_end; blocked "$(host "$url")" "${title:-страница проверки антибота}"; }
     sleep 4
   done
   why=; [ "$(level "$d")" = strict ] && why=$(soft_reason "$d")
@@ -588,8 +588,8 @@ FOX=$fox FOX_WHY="$why"
 EOF
   . "$ST/config"
   # Which IP Russian sites see: a RU address answers through the tunnel if there is one
-  vps=$(curl -4 -s -m 8 https://ifconfig.me/ip); ru=$(curl -4 -s -m 8 https://ipv4-internet.yandex.net/api/v0/ip | tr -d '"')
-  if [ -z "$ru" ]; then net="WARN: ipv4-internet.yandex.net не ответил — российские сайты недоступны с сервера"
+  vps=$(curl -4 -s -m 8 https://ifconfig.me/ip); ru=$(curl -4 -s -m 10 -L -A "Mozilla/5.0" https://yandex.ru/internet | grep -oE '"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}"' | head -1 | tr -d '"')
+  if [ -z "$ru" ]; then net="WARN: yandex.ru/internet не ответил — российские сайты недоступны с сервера"
   elif [ "$ru" != "$vps" ]; then net="российский IP через туннель: $ru"
   elif [ "$(curl -s -m 8 "https://ipinfo.io/$vps/country")" = RU ]; then net="VPS в России ($vps), туннель не нужен"
   else net="WARN: российские сайты видят зарубежный IP $vps — нужен туннель (SETUP.md, шаги 2–4)"; fi
@@ -650,7 +650,9 @@ case $cmd in
       out=$(web get --max "$max" "${http[@]}")
       grep -v '^NEED_BROWSER ' <<<"$out" | cat -s
       while read -r _ u why; do u=${u%:}
-        "$0" mark "$u" "авто: http — $why" >/dev/null; log "fetch → browser $(host "$u") ($why)"; br+=("$u")
+        # 404 and network errors say nothing about the site's anti-bot: try the browser this once, don't list the domain forever
+        case $why in "HTTP 404"*|сеть:*) ;; *) "$0" mark "$u" "авто: http — $why" >/dev/null ;; esac
+        log "fetch → browser $(host "$u") ($why)"; br+=("$u")
       done < <(grep '^NEED_BROWSER ' <<<"$out")
     fi
     for u in "${br[@]}"; do   # one by one: the browser has one owner
