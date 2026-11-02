@@ -86,6 +86,8 @@ def merge(path, patch):
     json.dump(d, open(path, 'w'))
 merge(os.path.join(p, 'Local State'), {'dns_over_https': {'mode': 'secure', 'templates': 'https://77.88.8.8/dns-query'}})
 merge(os.path.join(p, 'Default', 'Preferences'), {
+    # A pinch in the owner's window saves a per-site zoom; devicePixelRatio 0.75 and a page wider than the screen then give the bot away
+    'partition': {'per_host_zoom_levels': {}},
     'intl': {'selected_languages': 'ru-RU,ru', 'accept_languages': 'ru-RU,ru'},
     'webrtc': {'ip_handling_policy': 'disable_non_proxied_udp', 'multiple_routes_enabled': False, 'nonproxied_udp_enabled': False}})
 PY
@@ -167,9 +169,12 @@ captcha() {
   # Captcha widget on the page (largest *captcha* element ≤ half the width; ServicePipe puts it at the left) → a third of the
   # screen around it; none (login form etc.) → the middle half. Page x = screen x: the window sits at x=0 without a side border.
   local W H cx cw clip=; read -r W H < <(XAUTHORITY=${auth:-} xdpyinfo -display "$disp" 2>/dev/null | awk '/dimensions:/ {split($2, a, "x"); print a[1], a[2]}')
+  # Chrome: agent-browser's Xvfb is 1280x720, the window 1440x900 at (10,10) overflows it, so centred dialogs and the bottom fall off
+  # screen. Shrink the page to what is visible while the owner works; captcha_done restores it. Camoufox has its own 1440x900 screen.
+  local ox=0; if [ "$MODE" != fox ] && [ -n "${W:-}" ]; then ox=10; ab set viewport $(( W - 20 )) $(( H - 170 )) >/dev/null 2>&1; fi
   local try; for try in 1 2 3 4 5 6; do   # ServicePipe draws its captcha a few seconds after the page loads
   read -r cx cw < <(ab eval "(() => { let b = null; for (const e of document.querySelectorAll('[class*=captcha i],[id*=captcha i],iframe[src*=captcha i]')) {
-      const r = e.getBoundingClientRect(); if (r.width > 60 && r.height > 60 && r.width <= innerWidth / 2 && (!b || r.width * r.height > b.width * b.height)) b = r; }
+      const r = e.getBoundingClientRect(); if (r.width > 60 && r.height > 60 && r.width <= innerWidth / 2 && r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight && getComputedStyle(e).visibility !== 'hidden' && (!b || r.width * r.height > b.width * b.height)) b = r; }
       return b ? Math.round(b.x + b.width / 2) + ' ' + Math.round(b.width) : '' })()" 2>/dev/null | tr -d '"')
   [ -n "${cx:-}" ] && break; sleep 1.5; done
   # No widget and a bare "Forbidden" (ServicePipe hard ban of the IP): nothing for the owner to pass
@@ -180,7 +185,7 @@ captcha() {
     exit 4
   fi
   if [ -n "${W:-}" ]; then
-    if [ -n "${cx:-}" ]; then local w=$(( W / 3 > cw + 80 ? W / 3 : cw + 80 )) x; x=$(( cx - w / 2 )); (( x < 0 )) && x=0; (( x > W - w )) && x=$(( W - w ))
+    if [ -n "${cx:-}" ]; then local w=$(( W / 3 > cw + 80 ? W / 3 : cw + 80 )) x; x=$(( cx + ox - w / 2 )); (( x < 0 )) && x=0; (( x > W - w )) && x=$(( W - w ))
       clip="${w}x$H+$x+0"
     else clip="$(( W / 2 ))x$H+$(( W / 4 ))+0"; fi
   fi
@@ -206,6 +211,7 @@ captcha_done() {
   [ -n "$d" ] || { echo "NO_CAPTCHA: окна нет — закрыто или истекло (30 мин). Если сайт всё ещё просит проверку — ruweb captcha <url> и новую ссылку владельцу."; exit 1; }
   # the owner passed it by hand: earlier blocks of this site no longer count
   awk -v d="$d" '$1!=d' "$ST/blocks" > "$ST/blocks.t" && mv "$ST/blocks.t" "$ST/blocks"
+  [ "$MODE" = fox ] || ab set viewport $VW $VH >/dev/null 2>&1
   echo "$d" > "$ST/site"   # the owner just used this site: an immediate `open` on it must not read as BUSY
   log "captcha done $d"; jlog_begin captcha "$d" owner; check_block "$d"; jlog_end
 }
