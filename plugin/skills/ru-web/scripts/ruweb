@@ -638,7 +638,12 @@ case $cmd in
     [ -x "$HTTP_PY" ] || { echo "NO_RESULTS: нет быстрого уровня — ruweb setup; пока используй web_search"; exit 1; }
     web search "$@" ;;
   fetch)    # fetch [--max N] url... — auto tier: listed sites → browser; the rest → HTTP, and the browser only where HTTP failed
-    max=20000; [ "${1:-}" = --max ] && { max=$2; shift 2; }
+    max=20000; _fa=()
+    while [ $# -gt 0 ]; do
+      if [ "$1" = --max ]; then [ $# -gt 1 ] && { max=$2; shift 2; } || shift
+      else _fa+=("$1"); shift; fi
+    done
+    set -- "${_fa[@]}"
     http=() br=() rc=0
     for u; do if site "$u" >/dev/null || [ ! -x "$HTTP_PY" ]; then br+=("$u"); else http+=("$u"); fi; done
     if [ ${#http[@]} -gt 0 ]; then
