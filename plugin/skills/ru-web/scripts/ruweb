@@ -206,6 +206,7 @@ captcha_done() {
   [ -n "$d" ] || { echo "NO_CAPTCHA: окна нет — закрыто или истекло (30 мин). Если сайт всё ещё просит проверку — ruweb captcha <url> и новую ссылку владельцу."; exit 1; }
   # the owner passed it by hand: earlier blocks of this site no longer count
   awk -v d="$d" '$1!=d' "$ST/blocks" > "$ST/blocks.t" && mv "$ST/blocks.t" "$ST/blocks"
+  echo "$d" > "$ST/site"   # the owner just used this site: an immediate `open` on it must not read as BUSY
   log "captcha done $d"; jlog_begin captcha "$d" owner; check_block "$d"; jlog_end
 }
 
